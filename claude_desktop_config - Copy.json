@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "npx",
+      "args": ["-y", "mcp-obsidian", "C:\\Users\\Moreh\\OneDrive\\Documentos\\trading mind"],
+      "env": {
+        "OBSIDIAN_API_KEY":
+      }a0cf625ba328c8be3de130434e9fbfcccfd5630bd049c6f209c2e31fafe6bcce
+    }
+  }
+}

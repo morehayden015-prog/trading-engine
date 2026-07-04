@@ -1,0 +1,30 @@
+# Environment variables (API keys — never push these)
+.env
+
+# Database (trade data stays local)
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Strategy weights (auto-generated, not needed in repo)
+strategy_weights.json
+
+# VS Code
+.vscode/
+
+# ZIP files
+*.zip
+
+# Fix files
+fix.py
+fix2.py
+check_db.py

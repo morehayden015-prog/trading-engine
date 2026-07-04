@@ -1,0 +1,58 @@
+//@version=5
+indicator("Hayden — Mamba Scalp", overlay=true, max_bars_back=500)
+
+// ── Inputs ───────────────────────────────────────────────
+webhookSymbol = input.string("NQ",   "Symbol (NQ / ES)")
+webhookTF     = input.string("5",    "Timeframe")
+volMultiple   = input.float(1.5,     "Volume Spike Multiple")
+srLookback    = input.int(20,        "S/R Lookback Bars")
+sessionOnly   = input.bool(true,     "NY Open Session Only")
+
+// ── Session: 9:30–11:30am EST ─────────────────────────────
+nyStart = timestamp("UTC", year, month, dayofmonth, 13, 30)
+nyEnd   = timestamp("UTC", year, month, dayofmonth, 16, 30)
+inSession = not sessionOnly or (time >= nyStart and time <= nyEnd)
+
+// ── S/R Levels ────────────────────────────────────────────
+srHigh = ta.highest(high, srLookback)
+srLow  = ta.lowest(low,   srLookback)
+srMid  = (srHigh + srLow) / 2
+
+// ── Volume Spike ──────────────────────────────────────────
+avgVol    = ta.sma(volume, 20)
+volSpike  = volume > avgVol * volMultiple
+
+// ── Trendline Break Proxy (EMA cross) ─────────────────────
+ema8  = ta.ema(close, 8)
+ema21 = ta.ema(close, 21)
+
+bullTrendBreak = ta.crossover(ema8, ema21)
+bearTrendBreak = ta.crossunder(ema8, ema21)
+
+// ── S/R Confluence ────────────────────────────────────────
+nearSRHigh = high >= srHigh * 0.999
+nearSRLow  = low  <= srLow  * 1.001
+nearSRMid  = math.abs(close - srMid) / srMid < 0.002
+
+// ── Entry Conditions ─────────────────────────────────────
+longEntry  = bullTrendBreak and volSpike and (nearSRLow or nearSRMid) and close > open and inSession
+shortEntry = bearTrendBreak and volSpike and (nearSRHigh or nearSRMid) and close < open and inSession
+
+// ── Alerts ────────────────────────────────────────────────
+longMsg  = '{"symbol":"' + webhookSymbol + '","direction":"LONG","strategy":"mamba_scalp","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+shortMsg = '{"symbol":"' + webhookSymbol + '","direction":"SHORT","strategy":"mamba_scalp","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+
+if longEntry
+    alert(longMsg, alert.freq_once_per_bar)
+if shortEntry
+    alert(shortMsg, alert.freq_once_per_bar)
+
+// ── Visuals ───────────────────────────────────────────────
+plot(srHigh, "SR High", color=color.new(color.red,   50), linewidth=1, style=plot.style_linebr)
+plot(srLow,  "SR Low",  color=color.new(color.green, 50), linewidth=1, style=plot.style_linebr)
+plot(srMid,  "SR Mid",  color=color.new(color.gray,  50), linewidth=1, style=plot.style_linebr)
+plot(ema8,   "EMA 8",   color=color.new(color.blue,  30), linewidth=1)
+plot(ema21,  "EMA 21",  color=color.new(color.orange,30), linewidth=1)
+plotshape(longEntry,  title="MAMBA LONG",  location=location.belowbar, style=shape.triangleup,   color=color.lime, size=size.small)
+plotshape(shortEntry, title="MAMBA SHORT", location=location.abovebar, style=shape.triangledown, color=color.red,  size=size.small)
+bgcolor(volSpike ? color.new(color.yellow, 92) : na, title="Volume Spike")

@@ -1,0 +1,74 @@
+//@version=5
+indicator("Hayden — RP Profits", overlay=true)
+
+// ── Inputs ───────────────────────────────────────────────
+webhookSymbol = input.string("ES",   "Symbol (ES / NQ / XAUUSD)")
+webhookTF     = input.string("5",    "Timeframe")
+breakPoints   = input.float(5.0,     "Breakout Points Buffer")
+slPoints      = input.float(6.0,     "Stop Loss Points")
+
+// ── Session: 9:30–10:30 EST (14:30–15:30 UTC) ────────────
+nyOpen  = timestamp("UTC", year, month, dayofmonth, 14, 30)
+nyClose = timestamp("UTC", year, month, dayofmonth, 15, 30)
+inNYOpen = time >= nyOpen and time <= nyClose
+
+// ── Opening Range (9:30 candle) ───────────────────────────
+var float orHigh = na
+var float orLow  = na
+var bool  orSet  = false
+
+isOpenBar = hour(time, "UTC") == 14 and minute(time, "UTC") == 30
+if isOpenBar and dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+    orHigh := high
+    orLow  := low
+    orSet  := true
+
+// ── Track untested session highs/lows ────────────────────
+var float prevAsiaHigh  = na
+var float prevAsiaLow   = na
+
+asiaStart = timestamp("UTC", year, month, dayofmonth, 0, 0)
+asiaEnd   = timestamp("UTC", year, month, dayofmonth, 7, 0)
+inAsia    = time >= asiaStart and time < asiaEnd
+
+if inAsia
+    prevAsiaHigh := na(prevAsiaHigh) ? high : math.max(prevAsiaHigh, high)
+    prevAsiaLow  := na(prevAsiaLow)  ? low  : math.min(prevAsiaLow,  low)
+
+// ── Setup 1: OR Break + Retest ────────────────────────────
+slBuffer = slPoints
+
+longSetup1  = orSet and inNYOpen and close > orHigh + breakPoints and low <= orHigh
+shortSetup1 = orSet and inNYOpen and close < orLow  - breakPoints and high >= orLow
+
+// ── Setup 2: Short at untested Asia/London high ───────────
+nearestHigh = not na(prevAsiaHigh) ? prevAsiaHigh : orHigh
+shortSetup2 = orSet and inNYOpen and high >= nearestHigh - breakPoints and close < open and close < nearestHigh
+
+// ── Setup 3: Long at untested Asia/London low ─────────────
+nearestLow = not na(prevAsiaLow) ? prevAsiaLow : orLow
+longSetup3 = orSet and inNYOpen and low <= nearestLow + breakPoints and close > open and close > nearestLow
+
+// ── Combine entries ───────────────────────────────────────
+longRetest1  = longSetup1
+shortRetest1 = shortSetup1
+longFinal    = (longRetest1 or longSetup3)
+shortFinal   = (shortRetest1 or shortSetup2)
+
+longSL  = longRetest1 ? orLow - slBuffer : longSetup3 ? nearestLow - slBuffer : low - slPoints
+shortSL = shortRetest1 ? orHigh + slBuffer : shortSetup2 ? nearestHigh + slBuffer : high + slPoints
+
+// ── Alerts ────────────────────────────────────────────────
+longMsg  = '{"symbol":"' + webhookSymbol + '","direction":"LONG","strategy":"rp_profits","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+shortMsg = '{"symbol":"' + webhookSymbol + '","direction":"SHORT","strategy":"rp_profits","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+
+if longFinal
+    alert(longMsg, alert.freq_once_per_bar)
+if shortFinal
+    alert(shortMsg, alert.freq_once_per_bar)
+
+// ── Visuals ───────────────────────────────────────────────
+plot(orSet ? orHigh : na, "OR High", color=color.new(color.blue,  40), style=plot.style_linebr)
+plot(orSet ? orLow  : na, "OR Low",  color=color.new(color.orange,40), style=plot.style_linebr)
+plotshape(longFinal,  title="RP LONG",  location=location.belowbar, style=shape.triangleup,   color=color.lime, size=size.small)
+plotshape(shortFinal, title="RP SHORT", location=location.abovebar, style=shape.triangledown, color=color.red,  size=size.small)

@@ -1,0 +1,38 @@
+# ── Bot config ──────────────────────────────────────────────────────────────
+MODE=paper
+PHASE=2
+ALLOWED_SYMBOLS=XAUUSD,ES,NQ,CL
+MAX_CONCURRENT_POSITIONS=2
+MIN_SCORE=6.5
+
+# ── Account ──────────────────────────────────────────────────────────────────
+ACCOUNT_SIZE=10000
+BASE_RISK_PCT=1.0
+
+# ── Circuit breakers ─────────────────────────────────────────────────────────
+DAILY_LOSS_LIMIT_PCT=3.0
+WEEKLY_LOSS_LIMIT_PCT=7.0
+CONSEC_LOSS_LIMIT=4
+
+# ── News blackout ─────────────────────────────────────────────────────────────
+NEWS_BLACKOUT_BEFORE=10
+NEWS_BLACKOUT_AFTER=15
+
+# ── Calibration ──────────────────────────────────────────────────────────────
+CAL_TRADES_TRIGGER=25
+
+# ── API Keys ─────────────────────────────────────────────────────────────────
+ANTHROPIC_API_KEY=your_anthropic_key_here
+
+# ── Discord webhooks (3 channels) ────────────────────────────────────────────
+DISCORD_WEBHOOK=your_trade_alerts_webhook_here
+DISCORD_NEWS_WEBHOOK=your_market_news_webhook_here
+DISCORD_BOT_WEBHOOK=your_bot_updates_webhook_here
+
+# ── MyFXBook (optional) ───────────────────────────────────────────────────────
+MYFXBOOK_EMAIL=
+MYFXBOOK_PASSWORD=
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+DB_PATH=trades.db
+LOG_DIR=logs

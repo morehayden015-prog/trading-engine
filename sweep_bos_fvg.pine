@@ -1,0 +1,93 @@
+//@version=5
+indicator("Hayden — Sweep BOS FVG", overlay=true, max_bars_back=500)
+
+// ── Inputs ───────────────────────────────────────────────
+webhookSymbol  = input.string("XAUUSD",  "Symbol")
+webhookTF      = input.string("5",       "Timeframe")
+swingLen       = input.int(10,           "Swing Lookback", minval=3)
+fvgMinSize     = input.float(0.5,        "Min FVG Size (pts)")
+sessionFilter  = input.bool(true,        "London/NY Session Only")
+
+// ── Session filter (London 3-12 UTC, NY 12-21 UTC) ───────
+inSession = true
+if sessionFilter
+    h = hour(time, "UTC")
+    inSession := (h >= 3 and h < 21)
+
+// ── Swing High / Low ──────────────────────────────────────
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow  = ta.pivotlow(low,  swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(swingHigh)
+    lastSwingHigh := swingHigh
+if not na(swingLow)
+    lastSwingLow := swingLow
+
+// ── Liquidity Sweep Detection ─────────────────────────────
+bullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+
+// ── BOS Detection ─────────────────────────────────────────
+var bool waitingBullBOS = false
+var bool waitingBearBOS = false
+var float sweepLow  = na
+var float sweepHigh = na
+
+if bullSweep
+    waitingBullBOS := true
+    sweepLow := low
+
+if bearSweep
+    waitingBearBOS := true
+    sweepHigh := high
+
+bullBOS = waitingBullBOS and close > ta.highest(high, 5)[1]
+bearBOS = waitingBearBOS and close < ta.lowest(low, 5)[1]
+
+if bullBOS
+    waitingBullBOS := false
+if bearBOS
+    waitingBearBOS := false
+
+// ── FVG Detection ─────────────────────────────────────────
+bullFVG = low > high[2] and (low - high[2]) >= fvgMinSize
+bearFVG = high < low[2] and (low[2] - high) >= fvgMinSize
+
+var float bullFVGTop = na
+var float bullFVGBot = na
+var float bearFVGTop = na
+var float bearFVGBot = na
+
+if bullFVG and bullBOS[1]
+    bullFVGTop := low
+    bullFVGBot := high[2]
+
+if bearFVG and bearBOS[1]
+    bearFVGTop := low[2]
+    bearFVGBot := high
+
+// ── Entry: Price returns into FVG ─────────────────────────
+longEntry  = not na(bullFVGBot) and low <= bullFVGTop and low >= bullFVGBot and close > open
+shortEntry = not na(bearFVGBot) and high >= bearFVGBot and high <= bearFVGTop and close < open
+
+longEntry  := longEntry and inSession
+shortEntry := shortEntry and inSession
+
+// ── Alerts ────────────────────────────────────────────────
+longMsg  = '{"symbol":"' + webhookSymbol + '","direction":"LONG","strategy":"sweep_bos_fvg","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+shortMsg = '{"symbol":"' + webhookSymbol + '","direction":"SHORT","strategy":"sweep_bos_fvg","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+
+if longEntry
+    alert(longMsg, alert.freq_once_per_bar)
+
+if shortEntry
+    alert(shortMsg, alert.freq_once_per_bar)
+
+// ── Visuals ───────────────────────────────────────────────
+plotshape(longEntry,  title="LONG",  location=location.belowbar, style=shape.triangleup,   color=color.lime,  size=size.small)
+plotshape(shortEntry, title="SHORT", location=location.abovebar, style=shape.triangledown, color=color.red,   size=size.small)
+plot(lastSwingHigh, "Swing High", color=color.new(color.red,   70), style=plot.style_circles, linewidth=1)
+plot(lastSwingLow,  "Swing Low",  color=color.new(color.green, 70), style=plot.style_circles, linewidth=1)

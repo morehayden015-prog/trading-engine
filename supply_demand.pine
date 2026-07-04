@@ -1,0 +1,88 @@
+//@version=5
+indicator("Hayden — Supply & Demand", overlay=true, max_bars_back=500)
+
+// ── Inputs ───────────────────────────────────────────────
+webhookSymbol  = input.string("XAUUSD", "Symbol")
+webhookTF      = input.string("15",     "Timeframe")
+momentumBars   = input.int(3,           "Min Momentum Candles", minval=2, maxval=6)
+zoneBuffer     = input.float(0.5,       "Zone Buffer (pts)")
+confirmClose   = input.bool(true,       "Require Confirmation Close")
+
+// ── Momentum Detection ────────────────────────────────────
+bullMomentum(n) =>
+    result = true
+    for i = 0 to n - 1
+        if close[i] <= open[i]
+            result := false
+    result
+
+bearMomentum(n) =>
+    result = true
+    for i = 0 to n - 1
+        if close[i] >= open[i]
+            result := false
+    result
+
+hasBullMomentum = bullMomentum(momentumBars)
+hasBearMomentum = bearMomentum(momentumBars)
+
+// ── Zone: base candle before momentum ─────────────────────
+var float demandTop = na
+var float demandBot = na
+var float supplyTop = na
+var float supplyBot = na
+
+if hasBullMomentum
+    demandBot := low[momentumBars]
+    demandTop := high[momentumBars]
+
+if hasBearMomentum
+    supplyTop := high[momentumBars]
+    supplyBot := low[momentumBars]
+
+// ── 6 Keys Confirmation ───────────────────────────────────
+demandMid = not na(demandBot) ? (demandTop + demandBot) / 2 : na
+supplyMid = not na(supplyBot) ? (supplyTop + supplyBot) / 2 : na
+
+longEntry = not na(demandBot) and
+     low <= demandTop + zoneBuffer and
+     low >= demandBot - zoneBuffer and
+     close > open and
+     (not confirmClose or close > demandMid)
+
+shortEntry = not na(supplyBot) and
+     high >= supplyBot - zoneBuffer and
+     high <= supplyTop + zoneBuffer and
+     close < open and
+     (not confirmClose or close < supplyMid)
+
+// Clear zones once entered
+if longEntry
+    demandBot := na
+    demandTop := na
+if shortEntry
+    supplyBot := na
+    supplyTop := na
+
+// ── Alerts ────────────────────────────────────────────────
+longMsg  = '{"symbol":"' + webhookSymbol + '","direction":"LONG","strategy":"supply_demand","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+shortMsg = '{"symbol":"' + webhookSymbol + '","direction":"SHORT","strategy":"supply_demand","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+
+if longEntry
+    alert(longMsg, alert.freq_once_per_bar)
+if shortEntry
+    alert(shortMsg, alert.freq_once_per_bar)
+
+// ── Visuals ───────────────────────────────────────────────
+var box demandBox = na
+if hasBullMomentum and not na(demandBot)
+    demandBox := box.new(bar_index - momentumBars, demandTop, bar_index + 20, demandBot,
+         border_color=color.new(color.green, 40), bgcolor=color.new(color.green, 85))
+
+var box supplyBox = na
+if hasBearMomentum and not na(supplyBot)
+    supplyBox := box.new(bar_index - momentumBars, supplyTop, bar_index + 20, supplyBot,
+         border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 85))
+
+plotshape(longEntry,  title="SD LONG",  location=location.belowbar, style=shape.triangleup,   color=color.lime, size=size.small)
+plotshape(shortEntry, title="SD SHORT", location=location.abovebar, style=shape.triangledown, color=color.red,  size=size.small)

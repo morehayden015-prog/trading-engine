@@ -1,0 +1,82 @@
+//@version=5
+indicator("Hayden — ORB Scalp", overlay=true)
+
+// ── Inputs ───────────────────────────────────────────────
+webhookSymbol  = input.string("ES",  "Symbol (ES / NQ / CL)")
+webhookTF      = input.string("5",   "Timeframe")
+orbMinutes     = input.int(5,        "ORB Duration (minutes)", minval=1, maxval=30)
+dispPoints     = input.float(4.0,    "Displacement Points")
+fvgMinSize     = input.float(1.5,    "Min FVG Size (pts)")
+
+// ── Opening Range ─────────────────────────────────────────
+orbStartUTC = timestamp("UTC", year, month, dayofmonth, 13, 30)
+orbEndUTC   = timestamp("UTC", year, month, dayofmonth, 13, 30 + orbMinutes)
+sessionEnd  = timestamp("UTC", year, month, dayofmonth, 15, 30)
+
+isWeekday = dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+
+var float orbH = na
+var float orbL = na
+var bool  orbDone = false
+
+if time >= orbStartUTC and time < orbEndUTC and isWeekday
+    orbH := na(orbH) ? high : math.max(orbH, high)
+    orbL := na(orbL) ? low  : math.min(orbL, low)
+
+if time >= orbEndUTC and not orbDone and not na(orbH)
+    orbDone := true
+
+// Reset at start of new day
+if isOpenBar = (hour(time,"UTC") == 13 and minute(time,"UTC") == 30)
+    orbH    := na
+    orbL    := na
+    orbDone := false
+
+// ── Step 2: Displacement Break ────────────────────────────
+inSession   = time > orbEndUTC and time <= sessionEnd and isWeekday
+bullBreak   = orbDone and inSession and close > orbH + dispPoints
+bearBreak   = orbDone and inSession and close < orbL - dispPoints
+
+var bool waitLong  = false
+var bool waitShort = false
+if bullBreak then waitLong  := true
+if bearBreak then waitShort := true
+
+// ── Step 3: FVG Pullback Entry ────────────────────────────
+bullFVG = waitLong  and low[1] > high[3] and (low[1] - high[3]) >= fvgMinSize
+bearFVG = waitShort and high[1] < low[3] and (low[3] - high[1]) >= fvgMinSize
+
+var float bFVGTop = na
+var float bFVGBot = na
+var float sFVGTop = na
+var float sFVGBot = na
+
+if bullFVG
+    bFVGTop := low[1]
+    bFVGBot := high[3]
+if bearFVG
+    sFVGTop := low[3]
+    sFVGBot := high[1]
+
+longEntry  = waitLong  and not na(bFVGBot) and low <= bFVGTop and close > bFVGBot and close > open
+shortEntry = waitShort and not na(sFVGBot) and high >= sFVGBot and close < sFVGTop and close < open
+
+if longEntry  then waitLong  := false
+if shortEntry then waitShort := false
+
+// ── Alerts ────────────────────────────────────────────────
+longMsg  = '{"symbol":"' + webhookSymbol + '","direction":"LONG","strategy":"orb_scalp","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+shortMsg = '{"symbol":"' + webhookSymbol + '","direction":"SHORT","strategy":"orb_scalp","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+
+if longEntry
+    alert(longMsg, alert.freq_once_per_bar)
+if shortEntry
+    alert(shortMsg, alert.freq_once_per_bar)
+
+// ── Visuals ───────────────────────────────────────────────
+plot(orbDone ? orbH : na, "ORB High", color=color.new(color.blue,   30), style=plot.style_linebr, linewidth=2)
+plot(orbDone ? orbL : na, "ORB Low",  color=color.new(color.purple, 30), style=plot.style_linebr, linewidth=2)
+plotshape(bullBreak,  title="Bull Break", location=location.belowbar, style=shape.circle,        color=color.aqua, size=size.tiny)
+plotshape(bearBreak,  title="Bear Break", location=location.abovebar, style=shape.circle,        color=color.orange, size=size.tiny)
+plotshape(longEntry,  title="ORB LONG",   location=location.belowbar, style=shape.triangleup,    color=color.lime, size=size.small)
+plotshape(shortEntry, title="ORB SHORT",  location=location.abovebar, style=shape.triangledown,  color=color.red,  size=size.small)

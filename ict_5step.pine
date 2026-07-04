@@ -1,0 +1,74 @@
+//@version=5
+indicator("Hayden — ICT 5-Step", overlay=true, max_bars_back=500)
+
+// ── Inputs ───────────────────────────────────────────────
+webhookSymbol = input.string("NQ",   "Symbol")
+webhookTF     = input.string("5",    "Timeframe")
+htfBias       = input.string("AUTO", "HTF Bias", options=["AUTO", "BULL", "BEAR"])
+fvgMinPts     = input.float(2.0,     "Min FVG Size (pts)")
+sessionOnly   = input.bool(true,     "9:30–11am EST Only")
+
+// ── Session filter ────────────────────────────────────────
+nyStart = timestamp("UTC", year, month, dayofmonth, 13, 30)
+nyEnd   = timestamp("UTC", year, month, dayofmonth, 16, 00)
+inSession = not sessionOnly or (time >= nyStart and time <= nyEnd)
+
+// ── Step 1: HTF Bias (auto = 15M trend) ──────────────────
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+autoBull = ema50 > ema200
+autoBear = ema50 < ema200
+isBull = htfBias == "BULL" or (htfBias == "AUTO" and autoBull)
+isBear = htfBias == "BEAR" or (htfBias == "AUTO" and autoBear)
+
+// ── Step 2: Key Level (recent swing) ─────────────────────
+swingH = ta.pivothigh(high, 8, 8)
+swingL = ta.pivotlow(low,   8, 8)
+var float keyHigh = na
+var float keyLow  = na
+if not na(swingH) then keyHigh := swingH
+if not na(swingL) then keyLow  := swingL
+
+// ── Step 3: Manipulation Leg (liquidity sweep) ───────────
+bullManip = isBull and not na(keyLow)  and low < keyLow  and close > keyLow
+bearManip = isBear and not na(keyHigh) and high > keyHigh and close < keyHigh
+
+var bool bullSetup = false
+var bool bearSetup = false
+if bullManip then bullSetup := true
+if bearManip then bearSetup := true
+
+// ── Step 4: Inversion FVG after manipulation ─────────────
+bullInvFVG = bullSetup and low[1] > high[3] and (low[1] - high[3]) >= fvgMinPts
+bearInvFVG = bearSetup and high[1] < low[3] and (low[3] - high[1]) >= fvgMinPts
+
+var float invFVGTop = na
+var float invFVGBot = na
+if bullInvFVG
+    invFVGTop := low[1]
+    invFVGBot := high[3]
+    bullSetup := false
+if bearInvFVG
+    invFVGTop := low[3]
+    invFVGBot := high[1]
+    bearSetup := false
+
+// ── Step 5: Entry on return to inversion FVG ─────────────
+longEntry  = not na(invFVGBot) and low <= invFVGTop and low >= invFVGBot and close > open and isBull and inSession
+shortEntry = not na(invFVGBot) and high >= invFVGBot and high <= invFVGTop and close < open and isBear and inSession
+
+// ── Alerts ────────────────────────────────────────────────
+longMsg  = '{"symbol":"' + webhookSymbol + '","direction":"LONG","strategy":"ict_5step","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+shortMsg = '{"symbol":"' + webhookSymbol + '","direction":"SHORT","strategy":"ict_5step","timeframe":"' + webhookTF + '","price":' + str.tostring(close) + '}'
+
+if longEntry
+    alert(longMsg, alert.freq_once_per_bar)
+if shortEntry
+    alert(shortMsg, alert.freq_once_per_bar)
+
+// ── Visuals ───────────────────────────────────────────────
+plotshape(bullManip, title="Bull Manip", location=location.belowbar, style=shape.xcross, color=color.yellow, size=size.tiny)
+plotshape(bearManip, title="Bear Manip", location=location.abovebar, style=shape.xcross, color=color.yellow, size=size.tiny)
+plotshape(longEntry,  title="ICT LONG",  location=location.belowbar, style=shape.triangleup,   color=color.lime, size=size.small)
+plotshape(shortEntry, title="ICT SHORT", location=location.abovebar, style=shape.triangledown, color=color.red,  size=size.small)
+bgcolor(inSession ? color.new(color.blue, 95) : na, title="Session")

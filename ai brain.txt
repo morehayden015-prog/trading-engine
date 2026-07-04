@@ -1,0 +1,33 @@
+# =========================================================
+# HAYDEN'S GOLD AI TRADING BOT — environment configuration
+# =========================================================
+
+MODE=paper
+
+PHASE=1
+
+WEBHOOK_SECRET=hayden_private_key
+
+ACCOUNT_SIZE_USD=10000
+RISK_PER_TRADE_PCT=1.5
+DAILY_LOSS_LIMIT_PCT=4.0
+WEEKLY_LOSS_LIMIT_PCT=8.0
+MAX_TRADES_PER_SESSION=3
+
+ANTHROPIC_API_KEY=REPLACE_ME
+CLAUDE_MODEL=claude-sonnet-4-6
+
+TELEGRAM_BOT_TOKEN=REPLACE_ME
+TELEGRAM_CHAT_ID=REPLACE_ME
+
+DISCORD_WEBHOOK_URL=REPLACE_ME
+
+NEWS_BLOCK_BEFORE_MIN=15
+NEWS_BLOCK_AFTER_MIN=5
+
+EXECUTOR=paper
+NT_SIGNAL_DIR=signals
+
+HOST=0.0.0.0
+PORT=8000
+LOG_LEVEL=INFO
