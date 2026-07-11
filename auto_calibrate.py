@@ -110,8 +110,7 @@ async def calibration_loop():
         current_count = _get_labelled_count()
         if current_count - _last_trade_count >= TRADES_TRIGGER:
             log.info(f"Trade count trigger: {current_count} trades")
-            await run_calibration_cycle()
-            run_self_learning_cycle(trigger="trade_count")
+            await run_calibration_cycle()  # already calls run_self_learning_cycle internally
             _last_trade_count = current_count
 
 

@@ -23,6 +23,10 @@ from paper_executor import PaperExecutor
 from memory import Memory
 from news_checker import is_news_blackout
 from scanner import start_scanner
+from fee_tracker import FeeTracker
+from outcome_labeler import OutcomeLabeler
+from auto_calibrate import calibration_loop
+from daily_briefing import briefing_scheduler
 
 load_dotenv()
 
@@ -47,6 +51,7 @@ WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET", "hayden_private_key")
 
 executor = PaperExecutor()
 memory   = Memory()
+labeler  = OutcomeLabeler()
 
 
 @asynccontextmanager
@@ -56,9 +61,12 @@ async def lifespan(app: FastAPI):
         f"| Symbols={ALLOWED_SYMBOLS} | Port=8000"
     )
     asyncio.create_task(start_scanner())
+    asyncio.create_task(calibration_loop())
+    asyncio.create_task(briefing_scheduler())
     yield
     executor.close()
     memory.close()
+    labeler.close()
     log.info("Bot shutdown complete.")
 
 
@@ -92,6 +100,14 @@ async def webhook(request: Request):
         log.info(f"Trade blocked: {executor.get_open_count()}/{MAX_CONCURRENT} positions open")
         return JSONResponse({"status": "ignored", "reason": f"max concurrent positions ({MAX_CONCURRENT}) reached"})
 
+    # Circuit breaker check
+    ft = FeeTracker()
+    cb = ft.get_circuit_breaker_status()
+    ft.close()
+    if cb["status"] == "red":
+        log.warning(f"Trade blocked by circuit breaker: {cb['reason']}")
+        return JSONResponse({"status": "ignored", "reason": f"circuit breaker: {cb['reason']}"})
+
     direction = signal.get("direction", signal.get("action", "buy"))
     strategy  = signal.get("strategy", "unknown")
     timeframe = signal.get("timeframe", "5m")
@@ -118,4 +134,86 @@ async def webhook(request: Request):
     )
 
     log.info(
-        f"Signal | {symbol} 
+        f"Signal | {symbol} {direction} | strategy={strategy} | "
+        f"score={scored.get('total', 0):.2f} | ai={ai_confidence:.2f} | regime={ai_result.get('regime')}"
+    )
+
+    if scored.get("total", 0) >= 6.5:
+        trade = executor.open_trade(
+            symbol,
+            direction,
+            price,
+            strategy,
+            float(scored.get("total", 0)),
+            ai_reasoning=ai_result.get("reasoning", ""),
+        )
+        memory.record_signal(
+            symbol,
+            direction,
+            strategy,
+            float(scored.get("total", 0)),
+            trade_id=trade.get("trade_id"),
+            regime=ai_result.get("regime"),
+        )
+        await send_trade_alert(signal, scored, ai_result)
+        return JSONResponse({"status": "executed", "trade": trade})
+
+    return JSONResponse({
+        "status": "ignored",
+        "score": scored.get("total", 0),
+        "ai_confidence": ai_confidence,
+        "regime": ai_result.get("regime"),
+    })
+
+
+@app.post("/outcome")
+async def label_outcome(request: Request):
+    """Label a trade outcome. Body: {trade_id, result, exit_price (optional)}"""
+    body = await request.body()
+    try:
+        data = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    if data.get("secret") != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    trade_id   = data.get("trade_id")
+    result     = data.get("result", "").upper()
+    exit_price = data.get("exit_price")
+
+    if not trade_id or result not in ("WIN", "LOSS", "BE"):
+        raise HTTPException(status_code=400, detail="trade_id and result (WIN/LOSS/BE) required")
+
+    success = labeler.label_manual(trade_id, result, exit_price)
+    if not success:
+        return JSONResponse({"status": "error", "reason": "trade not found or already closed"}, status_code=404)
+
+    memory.record_outcome(trade_id, result)
+    log.info(f"Outcome labeled: {trade_id} → {result}")
+    return JSONResponse({"status": "ok", "trade_id": trade_id, "result": result})
+
+
+@app.get("/health")
+async def health():
+    ft = FeeTracker()
+    cb = ft.get_circuit_breaker_status()
+    ft.close()
+    return {
+        "status": "ok",
+        "mode": MODE,
+        "phase": PHASE,
+        "open_trades": executor.get_open_count(),
+        "circuit_breaker": cb["status"],
+        "cb_reason": cb["reason"],
+    }
+
+
+@app.get("/trades")
+async def get_trades():
+    return {"trades": executor.get_open_trades()}
+
+
+@app.get("/stats")
+async def get_stats():
+    return executor.get_session_stats()
