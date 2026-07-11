@@ -7,6 +7,8 @@ import os
 import json
 import asyncio
 import logging
+import hmac
+import hashlib
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -41,12 +43,13 @@ MODE            = os.getenv("MODE", "paper").lower()
 PHASE           = int(os.getenv("PHASE", "2"))
 ALLOWED_SYMBOLS = set(os.getenv("ALLOWED_SYMBOLS", "XAUUSD,ES,NQ,CL").split(","))
 MAX_CONCURRENT  = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
+WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET", "hayden_private_key")
 
 executor = PaperExecutor()
 memory   = Memory()
 
-@asynccontextmanager
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info(
         f"Starting Hayden Multi-Market Bot | MODE={MODE.upper()} | PHASE={PHASE} "
@@ -58,18 +61,9 @@ async def lifespan(app: FastAPI):
     memory.close()
     log.info("Bot shutdown complete.")
 
+
 app = FastAPI(lifespan=lifespan)
 
-
-
-from fastapi import Request
-import hmac, hashlib
-
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hayden_private_key")
-
-def verify_signature(payload: bytes, sig: str) -> bool:
-    expected = hmac.new(WEBHOOK_SECRET.encode(), payload, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, sig or "")
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -79,43 +73,49 @@ async def webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
+    # Secret check — scanner sends secret automatically, TradingView alerts must include it
+    if signal.get("secret") != WEBHOOK_SECRET:
+        log.warning("Webhook rejected: invalid secret")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     symbol = signal.get("symbol", "").upper()
     if symbol not in ALLOWED_SYMBOLS:
         return JSONResponse({"status": "ignored", "reason": f"{symbol} not allowed"})
 
+    # News blackout check
+    if is_news_blackout(symbol):
+        log.info(f"Trade blocked for {symbol}: news blackout active")
+        return JSONResponse({"status": "ignored", "reason": "news blackout"})
+
+    # Concurrent position limit
+    if executor.get_open_count() >= MAX_CONCURRENT:
+        log.info(f"Trade blocked: {executor.get_open_count()}/{MAX_CONCURRENT} positions open")
+        return JSONResponse({"status": "ignored", "reason": f"max concurrent positions ({MAX_CONCURRENT}) reached"})
+
+    direction = signal.get("direction", signal.get("action", "buy"))
+    strategy  = signal.get("strategy", "unknown")
+    timeframe = signal.get("timeframe", "5m")
+    price     = float(signal.get("price", 0))
+
+    # Run AI brain evaluation
+    mem_context = memory.get_context(symbol)
+    ai_result = await evaluate_signal(
+        symbol=symbol,
+        direction=direction,
+        price=price,
+        strategy=strategy,
+        timeframe=timeframe,
+        context=mem_context,
+    )
+    ai_confidence = ai_result.get("confidence", 0.5)
+
     scored = score_signal(
-        signal.get("symbol", "XAUUSD"),
-        signal.get("direction", signal.get("action", "buy")),
-        signal.get("strategy", "unknown"),
-        signal.get("timeframe", "5m"),
-        float(signal.get("ai_confidence", 0.7))
+        symbol,
+        direction,
+        strategy,
+        timeframe,
+        ai_confidence,
     )
 
-    if scored.get("total", 0) >= 6.5:
-        trade = executor.open_trade(
-            signal.get("symbol", "XAUUSD"),
-            signal.get("direction", signal.get("action", "buy")),
-            float(signal.get("price", 0)),
-            signal.get("strategy", "unknown"),
-            float(scored.get("total", 0))
-        )
-        memory.record_signal(
-            signal.get("symbol", "XAUUSD"),
-            signal.get("direction", signal.get("action", "buy")),
-            signal.get("strategy", "unknown"),
-            float(scored.get("total", 0))
-        )
-        await send_trade_alert(signal, scored, {})
-        return JSONResponse({"status": "executed", "trade": trade})
-
-    return JSONResponse({"status": "ignored", "score": scored.get("total", 0)})
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "mode": MODE, "phase": PHASE, "open_trades": executor.get_open_count()}
-
-
-@app.get("/trades")
-async def get_trades():
-    return {"trades": executor.get_open_trades()}
+    log.info(
+        f"Signal | {symbol} 

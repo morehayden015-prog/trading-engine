@@ -19,6 +19,7 @@ Or imported:     from scanner import start_scanner (called by main.py)
 import asyncio
 import logging
 import math
+import os
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -34,8 +35,9 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-WEBHOOK_URL   = "http://localhost:8000/webhook"
-SCAN_INTERVAL = 300
+WEBHOOK_URL    = "http://localhost:8000/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hayden_private_key")
+SCAN_INTERVAL  = 300
 
 SYMBOL_MAP = {
     "XAUUSD": "GC=F",
@@ -474,6 +476,7 @@ async def run_single_scan():
                 "reason":        reason,
                 "ai_confidence": 0.7,
                 "regime":        "UNKNOWN",
+                "secret":        WEBHOOK_SECRET,
             }
 
             print(f"[scanner] ✦ {symbol} {direction.upper()} via {strategy_name}: {reason}")
@@ -500,9 +503,4 @@ async def start_scanner():
         try:
             await run_single_scan()
         except Exception as e:
-            print(f"[scanner] scan loop error: {e}")
-        await asyncio.sleep(SCAN_INTERVAL)
-
-
-if __name__ == "__main__":
-    asyncio.run(run_single_scan())
+            print(f"[scanner] sca
