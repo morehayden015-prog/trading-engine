@@ -312,7 +312,7 @@ async def dashboard():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="30">
-<title>NEXUS // TRADING ENGINE</title>
+<title>SNUTS // TRADING ENGINE</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
 
@@ -324,9 +324,9 @@ async def dashboard():
   --bg:     #020b10;
   --bg2:    #040f17;
   --bg3:    #061520;
-  --border: #0a3040;
-  --dim:    #2a4a5a;
-  --text:   #8ab8c8;
+  --border: #0d3f54;
+  --dim:    #5a9ab5;
+  --text:   #b8dce8;
 }}
 
 * {{ box-sizing:border-box; margin:0; padding:0; }}
@@ -392,9 +392,9 @@ header {{
 /* ── SECTION LABEL ── */
 .section-label {{
   font-family:'Orbitron',monospace;
-  font-size:.6rem; letter-spacing:4px;
-  color:var(--cyan); opacity:.6;
-  margin-bottom:12px;
+  font-size:.72rem; letter-spacing:4px;
+  color:var(--cyan); opacity:.85;
+  margin-bottom:14px;
   display:flex; align-items:center; gap:10px;
 }}
 .section-label::after {{
@@ -422,7 +422,7 @@ header {{
   opacity:.4;
 }}
 .card-label {{
-  font-size:.6rem; letter-spacing:3px;
+  font-size:.7rem; letter-spacing:2px;
   color:var(--dim); text-transform:uppercase;
   margin-bottom:8px;
 }}
@@ -432,7 +432,7 @@ header {{
   line-height:1;
 }}
 .card-sub {{
-  font-size:.65rem; color:var(--dim);
+  font-size:.72rem; color:var(--dim);
   margin-top:6px; letter-spacing:1px;
 }}
 
@@ -449,8 +449,8 @@ header {{
   clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
   min-width:80px;
 }}
-.sym-name {{ font-size:.6rem; letter-spacing:3px; color:var(--dim); }}
-.sym-val  {{ font-family:'Orbitron',monospace; font-size:.75rem; font-weight:700; letter-spacing:2px; }}
+.sym-name {{ font-size:.72rem; letter-spacing:2px; color:var(--dim); }}
+.sym-val  {{ font-family:'Orbitron',monospace; font-size:.9rem; font-weight:700; letter-spacing:2px; }}
 
 /* ── TABLE ── */
 .table-wrap {{
@@ -462,44 +462,83 @@ header {{
 }}
 table {{ width:100%; border-collapse:collapse; }}
 th {{
-  font-size:.58rem; letter-spacing:3px; text-transform:uppercase;
-  color:var(--dim); padding:10px 14px; text-align:left;
+  font-size:.68rem; letter-spacing:2px; text-transform:uppercase;
+  color:var(--dim); padding:11px 14px; text-align:left;
   border-bottom:1px solid var(--border);
   background:var(--bg3);
 }}
-td {{ padding:10px 14px; border-bottom:1px solid rgba(10,48,64,.5); }}
+td {{ padding:11px 14px; border-bottom:1px solid rgba(13,63,84,.5); }}
 tr:last-child td {{ border-bottom:none; }}
-tr:hover td {{ background:rgba(0,255,231,.03); }}
-.mono {{ font-family:'Share Tech Mono',monospace; font-size:.82rem; }}
+tr:hover td {{ background:rgba(0,255,231,.04); }}
+.mono {{ font-family:'Share Tech Mono',monospace; font-size:.88rem; }}
 .accent {{ color:var(--cyan); }}
 .dim {{ color:var(--dim); }}
 
-/* ── AGENT STATUS ── */
-.agents {{
+/* ── AGENT MAP ── */
+.agent-map {{
   display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
-  gap:8px; margin-bottom:28px;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: auto auto;
+  gap:10px; margin-bottom:28px;
+  position:relative;
 }}
-.agent-card {{
+/* connector lines between cells */
+.agent-map::before {{
+  content:'';
+  position:absolute; inset:0;
+  background:
+    linear-gradient(90deg, transparent calc(25% - 1px), var(--border) calc(25%), transparent calc(25% + 1px)),
+    linear-gradient(90deg, transparent calc(50% - 1px), var(--border) calc(50%), transparent calc(50% + 1px)),
+    linear-gradient(90deg, transparent calc(75% - 1px), var(--border) calc(75%), transparent calc(75% + 1px));
+  pointer-events:none; opacity:.4;
+}}
+.agent-node {{
   background:var(--bg2);
   border:1px solid var(--border);
-  border-left:2px solid var(--cyan);
-  padding:10px 14px;
-  display:flex; align-items:center; gap:10px;
+  padding:14px;
+  position:relative;
+  display:flex; flex-direction:column; align-items:center;
+  text-align:center; gap:8px;
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+  transition: border-color .3s;
 }}
-.agent-dot {{
+.agent-node:hover {{ border-color: var(--cyan); }}
+.agent-node:hover .agent-icon {{ transform:scale(1.15); }}
+.agent-icon {{
+  width:36px; height:36px;
+  border:1px solid var(--cyan);
+  display:flex; align-items:center; justify-content:center;
+  font-size:1rem;
+  color:var(--cyan);
+  box-shadow: 0 0 10px rgba(0,255,231,.2);
+  transition:transform .3s;
+  position:relative;
+}}
+.agent-icon::before {{
+  content:'';
+  position:absolute; inset:-4px;
+  border:1px solid rgba(0,255,231,.15);
+}}
+.agent-ping {{
+  position:absolute; top:8px; right:8px;
   width:6px; height:6px; border-radius:50%;
   background:var(--cyan);
-  box-shadow: 0 0 8px var(--cyan);
-  animation: pulse 2s infinite;
-  flex-shrink:0;
+  box-shadow:0 0 8px var(--cyan);
+  animation:pulse 1.8s infinite;
+}}
+.agent-name {{ font-size:.72rem; letter-spacing:2px; color:#fff; font-family:'Orbitron',monospace; }}
+.agent-status {{ font-size:.65rem; color:var(--dim); line-height:1.4; }}
+.agent-freq {{
+  font-size:.6rem; letter-spacing:2px;
+  color:var(--cyan); opacity:.7;
+  border-top:1px solid var(--border);
+  padding-top:6px; width:100%;
+  text-align:center;
 }}
 @keyframes pulse {{
-  0%,100% {{ opacity:1; }}
-  50% {{ opacity:.3; }}
+  0%,100% {{ opacity:1; box-shadow:0 0 8px var(--cyan); }}
+  50% {{ opacity:.3; box-shadow:none; }}
 }}
-.agent-name {{ font-size:.65rem; letter-spacing:2px; color:var(--text); }}
-.agent-status {{ font-size:.58rem; color:var(--dim); margin-top:2px; }}
 
 /* ── FOOTER ── */
 footer {{
@@ -530,7 +569,7 @@ footer {{
   <div class="logo">
     <div class="logo-mark"><div class="logo-mark-inner"></div></div>
     <div class="logo-text">
-      <div class="logo-title">NEXUS</div>
+      <div class="logo-title">SNUTS</div>
       <div class="logo-sub">TRADING ENGINE // HAYDEN CORP</div>
     </div>
   </div>
@@ -606,16 +645,73 @@ footer {{
 
 </div>
 
-<!-- AGENT STATUS -->
+<!-- AGENT MAP -->
 <div class="section-label">ACTIVE AGENTS</div>
-<div class="agents">
-  <div class="agent-card"><div class="agent-dot"></div><div><div class="agent-name">INTEL AGENT</div><div class="agent-status">VIX · DXY · FEAR&amp;GREED // 15 MIN</div></div></div>
-  <div class="agent-card"><div class="agent-dot"></div><div><div class="agent-name">REGIME AGENT</div><div class="agent-status">CLAUDE + WEB SEARCH // 30 MIN</div></div></div>
-  <div class="agent-card"><div class="agent-dot"></div><div><div class="agent-name">RISK AGENT</div><div class="agent-status">DRAWDOWN · SIZING // 60 SEC</div></div></div>
-  <div class="agent-card"><div class="agent-dot"></div><div><div class="agent-name">TRADE MONITOR</div><div class="agent-status">BE · PARTIAL · TP/SL // 30 SEC</div></div></div>
-  <div class="agent-card"><div class="agent-dot"></div><div><div class="agent-name">SCANNER</div><div class="agent-status">16 STRATEGIES · 4 MARKETS // 5 MIN</div></div></div>
-  <div class="agent-card"><div class="agent-dot"></div><div><div class="agent-name">CALIBRATION</div><div class="agent-status">SELF-LEARNING // 25 TRADES</div></div></div>
-  <div class="agent-card"><div class="agent-dot"></div><div><div class="agent-name">BRIEFING</div><div class="agent-status">DAILY MARKET INTEL // 08:00 EST</div></div></div>
+<div class="agent-map">
+
+  <div class="agent-node">
+    <div class="agent-ping"></div>
+    <div class="agent-icon">◈</div>
+    <div class="agent-name">INTEL</div>
+    <div class="agent-status">VIX · DXY<br>FEAR &amp; GREED</div>
+    <div class="agent-freq">↻ 15 MIN</div>
+  </div>
+
+  <div class="agent-node">
+    <div class="agent-ping"></div>
+    <div class="agent-icon">⬡</div>
+    <div class="agent-name">REGIME</div>
+    <div class="agent-status">CLAUDE AI<br>WEB SEARCH</div>
+    <div class="agent-freq">↻ 30 MIN</div>
+  </div>
+
+  <div class="agent-node">
+    <div class="agent-ping"></div>
+    <div class="agent-icon">⚠</div>
+    <div class="agent-name">RISK</div>
+    <div class="agent-status">DRAWDOWN<br>SIZING SCALE</div>
+    <div class="agent-freq">↻ 60 SEC</div>
+  </div>
+
+  <div class="agent-node">
+    <div class="agent-ping"></div>
+    <div class="agent-icon">◎</div>
+    <div class="agent-name">MONITOR</div>
+    <div class="agent-status">BE · PARTIAL<br>TP / SL</div>
+    <div class="agent-freq">↻ 30 SEC</div>
+  </div>
+
+  <div class="agent-node">
+    <div class="agent-ping"></div>
+    <div class="agent-icon">⊞</div>
+    <div class="agent-name">SCANNER</div>
+    <div class="agent-status">16 STRATEGIES<br>4 MARKETS</div>
+    <div class="agent-freq">↻ 5 MIN</div>
+  </div>
+
+  <div class="agent-node">
+    <div class="agent-ping"></div>
+    <div class="agent-icon">∿</div>
+    <div class="agent-name">CALIBRATE</div>
+    <div class="agent-status">SELF-LEARNING<br>WEIGHT ADJ</div>
+    <div class="agent-freq">↻ 25 TRADES</div>
+  </div>
+
+  <div class="agent-node">
+    <div class="agent-ping"></div>
+    <div class="agent-icon">☀</div>
+    <div class="agent-name">BRIEFING</div>
+    <div class="agent-status">DAILY INTEL<br>MARKET SUMMARY</div>
+    <div class="agent-freq">↻ 08:00 EST</div>
+  </div>
+
+  <div class="agent-node" style="border-style:dashed;opacity:.4">
+    <div class="agent-icon" style="border-color:var(--dim);color:var(--dim)">+</div>
+    <div class="agent-name" style="color:var(--dim)">EXPAND</div>
+    <div class="agent-status">SLOT AVAILABLE</div>
+    <div class="agent-freq">OFFLINE</div>
+  </div>
+
 </div>
 
 <!-- SYMBOL BIAS -->
@@ -671,7 +767,7 @@ tick(); setInterval(tick, 1000);
 <!-- FOOTER -->
 <footer>
   <div class="footer-txt"><span class="live-dot"></span>LIVE DATA · AUTO-REFRESH 30S</div>
-  <div class="footer-txt">NEXUS ENGINE v2.0 // {now_str}</div>
+  <div class="footer-txt">SNUTS ENGINE v2.0 // {now_str}</div>
 </footer>
 
 </div>
