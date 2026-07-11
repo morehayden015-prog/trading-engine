@@ -730,51 +730,128 @@ function resize() {{ W = canvas.width = window.innerWidth; H = canvas.height = w
 resize();
 window.addEventListener('resize', resize);
 
-// Diamond constructor
+// ── GEM CUT DIAMOND ──
+// Colours: purple / gold / white (diamond-blue-white)
 function Diamond(spread) {{ this.reset(spread); }}
 Diamond.prototype.reset = function(spread) {{
-  this.x = Math.random() * W;
-  this.y = spread ? Math.random() * H : -60 - Math.random() * 300;
-  this.size = 10 + Math.random() * 28;
-  this.vy = 0.22 + Math.random() * 0.5;
-  this.vx = (Math.random() - 0.5) * 0.25;
+  this.x  = Math.random() * W;
+  this.y  = spread ? Math.random() * H : -80 - Math.random() * 300;
+  this.s  = 14 + Math.random() * 34;        // size
+  this.vy = 0.18 + Math.random() * 0.45;
+  this.vx = (Math.random() - 0.5) * 0.22;
   this.rot = Math.random() * Math.PI * 2;
-  this.rv = (Math.random() - 0.5) * 0.007;
+  this.rv  = (Math.random() - 0.5) * 0.006;
+  this.sparkPhase = Math.random() * Math.PI * 2;
   var r = Math.random();
-  this.col = r < 0.62 ? 'purple' : (r < 0.88 ? 'gold' : 'dark');
-  this.op = 0.12 + Math.random() * 0.28;
-  this.lw = 0.7 + Math.random() * 1.0;
+  // purple 50%, white 30%, gold 20%
+  this.col = r < 0.50 ? 'purple' : (r < 0.80 ? 'white' : 'gold');
+  this.op  = 0.18 + Math.random() * 0.38;
 }};
-Diamond.prototype.update = function() {{
+Diamond.prototype.update = function(t) {{
   this.y += this.vy; this.x += this.vx; this.rot += this.rv;
-  if (this.y > H + 70) this.reset(false);
+  if (this.y > H + 90) this.reset(false);
 }};
-Diamond.prototype.draw = function(cx) {{
+Diamond.prototype.draw = function(cx, t) {{
   cx.save();
   cx.translate(this.x, this.y);
   cx.rotate(this.rot);
   cx.globalAlpha = this.op;
-  var s = this.size;
-  var stroke = this.col === 'purple' ? '#9B30FF' : (this.col === 'gold' ? '#FFD700' : '#3D1060');
-  var glow   = this.col === 'purple' ? 'rgba(155,48,255,0.7)' : (this.col === 'gold' ? 'rgba(255,215,0,0.7)' : 'rgba(61,16,96,0.5)');
-  var inner  = this.col === 'purple' ? 'rgba(199,125,255,0.35)' : (this.col === 'gold' ? 'rgba(255,215,0,0.3)' : 'rgba(100,50,150,0.2)');
-  // outer
-  cx.beginPath(); cx.moveTo(0,-s); cx.lineTo(s*0.58,0); cx.lineTo(0,s); cx.lineTo(-s*0.58,0); cx.closePath();
-  cx.fillStyle = 'rgba(5,0,8,0.8)'; cx.fill();
-  cx.shadowColor = glow; cx.shadowBlur = 10;
-  cx.strokeStyle = stroke; cx.lineWidth = this.lw; cx.stroke();
-  // inner facet
-  cx.beginPath(); cx.moveTo(0,-s*0.48); cx.lineTo(s*0.3,0); cx.lineTo(0,s*0.48); cx.lineTo(-s*0.3,0); cx.closePath();
-  cx.shadowBlur = 0; cx.strokeStyle = inner; cx.lineWidth = 0.5; cx.stroke();
-  // equator
-  cx.beginPath(); cx.moveTo(-s*0.58,0); cx.lineTo(s*0.58,0);
-  cx.strokeStyle = this.col==='purple'?'rgba(155,48,255,0.2)':(this.col==='gold'?'rgba(255,215,0,0.2)':'rgba(61,16,96,0.15)');
-  cx.lineWidth = 0.4; cx.stroke();
+
+  var s = this.s;
+  // Gem proportions
+  var tw  = s * 0.55;   // table half-width
+  var th  = -s * 0.62;  // table y (crown top)
+  var gw  = s * 0.72;   // girdle half-width
+  var gy  = 0;           // girdle y
+  var cu  = s * 0.92;   // culet y (bottom tip)
+
+  // Colour palette
+  var mainC, glowC, facetC, fillC, hlC;
+  if (this.col === 'purple') {{
+    mainC  = '#9B30FF'; glowC = 'rgba(155,48,255,0.9)';
+    facetC = 'rgba(199,125,255,0.45)'; fillC = 'rgba(30,0,60,0.82)';
+    hlC    = 'rgba(220,180,255,0.55)';
+  }} else if (this.col === 'white') {{
+    mainC  = '#DCF0FF'; glowC = 'rgba(200,230,255,0.9)';
+    facetC = 'rgba(255,255,255,0.4)';  fillC = 'rgba(5,10,25,0.75)';
+    hlC    = 'rgba(255,255,255,0.75)';
+  }} else {{
+    mainC  = '#FFD700'; glowC = 'rgba(255,215,0,0.9)';
+    facetC = 'rgba(255,235,100,0.45)'; fillC = 'rgba(30,20,0,0.82)';
+    hlC    = 'rgba(255,245,180,0.65)';
+  }}
+
+  // ── 1. PAVILION fill (bottom half) ──
+  cx.beginPath();
+  cx.moveTo(-gw, gy); cx.lineTo(gw, gy); cx.lineTo(0, cu); cx.closePath();
+  cx.fillStyle = fillC; cx.fill();
+
+  // ── 2. CROWN fill (top half) ──
+  cx.beginPath();
+  cx.moveTo(-tw, th); cx.lineTo(tw, th);
+  cx.lineTo(gw, gy);  cx.lineTo(-gw, gy); cx.closePath();
+  cx.fillStyle = fillC; cx.fill();
+
+  // ── 3. Glow outline ──
+  cx.shadowColor = glowC; cx.shadowBlur = 14;
+  cx.strokeStyle = mainC; cx.lineWidth = 1.2;
+
+  // Outer silhouette
+  cx.beginPath();
+  cx.moveTo(-tw, th); cx.lineTo(tw, th);
+  cx.lineTo(gw, gy);  cx.lineTo(0, cu);
+  cx.lineTo(-gw, gy); cx.closePath();
+  cx.stroke();
+  cx.shadowBlur = 0;
+
+  // ── 4. Table top edge ──
+  cx.beginPath(); cx.moveTo(-tw, th); cx.lineTo(tw, th);
+  cx.strokeStyle = hlC; cx.lineWidth = 1.5; cx.stroke();
+
+  // ── 5. Crown facets (star pattern from table corners to girdle) ──
+  cx.strokeStyle = facetC; cx.lineWidth = 0.7;
+  // left crown facet
+  cx.beginPath(); cx.moveTo(-tw, th); cx.lineTo(-gw*0.5, gy); cx.stroke();
+  // right crown facet
+  cx.beginPath(); cx.moveTo(tw, th); cx.lineTo(gw*0.5, gy); cx.stroke();
+  // centre crown ridge
+  cx.beginPath(); cx.moveTo(0, th); cx.lineTo(0, gy); cx.stroke();
+  // upper-left to girdle
+  cx.beginPath(); cx.moveTo(-tw*0.4, th); cx.lineTo(-gw, gy); cx.stroke();
+  // upper-right to girdle
+  cx.beginPath(); cx.moveTo(tw*0.4, th); cx.lineTo(gw, gy); cx.stroke();
+
+  // ── 6. Pavilion facets ──
+  cx.strokeStyle = facetC; cx.lineWidth = 0.7;
+  // left pavilion ridge
+  cx.beginPath(); cx.moveTo(-gw*0.5, gy); cx.lineTo(0, cu); cx.stroke();
+  // right pavilion ridge
+  cx.beginPath(); cx.moveTo(gw*0.5, gy); cx.lineTo(0, cu); cx.stroke();
+  // cross pavilion
+  cx.beginPath(); cx.moveTo(-gw, gy); cx.lineTo(0, cu*0.55); cx.stroke();
+  cx.beginPath(); cx.moveTo(gw, gy); cx.lineTo(0, cu*0.55); cx.stroke();
+  // girdle mid line
+  cx.beginPath(); cx.moveTo(-gw, gy); cx.lineTo(gw, gy);
+  cx.strokeStyle = mainC; cx.lineWidth = 0.9; cx.stroke();
+
+  // ── 7. Animated sparkle flash on table ──
+  var spark = (Math.sin(t * 0.003 + this.sparkPhase) + 1) * 0.5;
+  if (spark > 0.7) {{
+    cx.globalAlpha = this.op * spark * 0.9;
+    var sx = (Math.random() - 0.5) * tw * 0.8;
+    var sy = th + Math.abs(Math.random() * (gy - th) * 0.4);
+    cx.strokeStyle = hlC; cx.lineWidth = 0.8;
+    var ss = s * 0.08;
+    // cross-hair sparkle
+    cx.beginPath(); cx.moveTo(sx-ss, sy); cx.lineTo(sx+ss, sy); cx.stroke();
+    cx.beginPath(); cx.moveTo(sx, sy-ss); cx.lineTo(sx, sy+ss); cx.stroke();
+  }}
+
   cx.restore();
 }};
 
 var gems = [];
-for (var i = 0; i < 20; i++) {{ gems.push(new Diamond(true)); }}
+for (var i = 0; i < 22; i++) {{ gems.push(new Diamond(true)); }}
 
 function drawGrid(t) {{
   var cols = 24, rows = 16, cw = W/cols, ch = H/rows;
@@ -821,7 +898,7 @@ function drawCenterGlow() {{
 function animate(t) {{
   c.clearRect(0,0,W,H);
   drawCenterGlow(); drawGrid(t); drawBeams(t);
-  gems.forEach(function(d) {{ d.update(); d.draw(c); }});
+  gems.forEach(function(d) {{ d.update(t); d.draw(c, t); }});
   requestAnimationFrame(animate);
 }}
 requestAnimationFrame(animate);
