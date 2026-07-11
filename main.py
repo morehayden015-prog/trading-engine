@@ -29,6 +29,7 @@ from auto_calibrate import calibration_loop
 from daily_briefing import briefing_scheduler
 from auto_labeler import auto_label_loop
 from intel_agent import intel_agent_loop
+from market_hours import is_market_open
 from regime_agent import regime_agent_loop
 from risk_agent import risk_agent_loop, check_correlation_risk
 from trade_monitor_agent import trade_monitor_agent_loop
@@ -100,6 +101,10 @@ async def webhook(request: Request):
     symbol = signal.get("symbol", "").upper()
     if symbol not in ALLOWED_SYMBOLS:
         return JSONResponse({"status": "ignored", "reason": f"{symbol} not allowed"})
+
+    # Weekend guard — no AI calls on weekends
+    if not is_market_open():
+        return JSONResponse({"status": "ignored", "reason": "weekend — markets closed"})
 
     # News blackout check
     if is_news_blackout(symbol):
@@ -224,6 +229,7 @@ async def health():
         "open_trades":     executor.get_open_count(),
         "circuit_breaker": cb["status"],
         "cb_reason":       cb["reason"],
+        "market_open":     is_market_open(),
     })
 
 

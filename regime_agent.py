@@ -131,6 +131,12 @@ async def regime_agent_loop():
 
     while True:
         try:
+            from market_hours import is_market_open
+            if not is_market_open():
+                log.info("Regime agent: weekend — skipping classification")
+                await asyncio.sleep(1800)
+                continue
+
             result = await classify_regime()
 
             new_regime = result.get("global_regime", "UNKNOWN")

@@ -496,12 +496,16 @@ async def run_single_scan():
 
 
 async def start_scanner():
+    from market_hours import is_market_open
     print(f"[scanner] starting. scanning every {SCAN_INTERVAL//60} minutes.")
     print(f"[scanner] markets: {', '.join(SYMBOL_MAP.keys())}")
     print(f"[scanner] strategies: {len(STRATEGY_DETECTORS)} total")
     while True:
         try:
-            await run_single_scan()
+            if is_market_open():
+                await run_single_scan()
+            else:
+                print("[scanner] weekend — markets closed, skipping scan")
         except Exception as e:
             print(f"[scanner] scan loop error: {e}")
         await asyncio.sleep(SCAN_INTERVAL)
