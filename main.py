@@ -278,8 +278,8 @@ async def dashboard():
     total_trades= stats.get("total", 0)
     market_open = is_market_open()
 
-    regime_clr  = {{"TRENDING_BULL":"#00ffe7","TRENDING_BEAR":"#ff1744","RANGING":"#ffb300","VOLATILE":"#ff6d00","TRANSITIONING":"#d500f9","UNKNOWN":"#546e7a"}}.get(regime,"#546e7a")
-    cb_clr      = {{"green":"#00ffe7","yellow":"#ffb300","red":"#ff1744"}}.get(cb["status"],"#546e7a")
+    regime_clr  = {"TRENDING_BULL":"#00ffe7","TRENDING_BEAR":"#ff1744","RANGING":"#ffb300","VOLATILE":"#ff6d00","TRANSITIONING":"#d500f9","UNKNOWN":"#546e7a"}.get(regime,"#546e7a")
+    cb_clr      = {"green":"#00ffe7","yellow":"#ffb300","red":"#ff1744"}.get(cb["status"],"#546e7a")
     pnl_clr     = "#00ffe7" if total_pnl >= 0 else "#ff1744"
     mkt_clr     = "#00ffe7" if market_open else "#ff1744"
     mkt_txt     = "ONLINE" if market_open else "WEEKEND"
@@ -300,7 +300,7 @@ async def dashboard():
         </tr>"""
 
     sym_bias_html = ""
-    for sym, b in ctx.get("symbol_bias", {{}}).items():
+    for sym, b in ctx.get("symbol_bias", {}).items():
         bc = "#00ffe7" if b=="BULL" else "#ff1744" if b=="BEAR" else "#546e7a"
         sym_bias_html += f'<div class="sym-node"><span class="sym-name">{sym}</span><span class="sym-val" style="color:{bc}">{b}</span></div>'
 
