@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("DB_PATH", "trades.db")
 LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 CAL_LOG = LOG_DIR / "calibration_history.jsonl"
 

@@ -17,7 +17,7 @@ load_dotenv()
 
 log      = logging.getLogger(__name__)
 LOG_DIR  = Path(os.getenv("LOG_DIR", "logs"))
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 client       = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "10000"))
