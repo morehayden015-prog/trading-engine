@@ -730,24 +730,22 @@ function resize() {{ W = canvas.width = window.innerWidth; H = canvas.height = w
 resize();
 window.addEventListener('resize', resize);
 
-// ── GEM CUT DIAMOND ──
-// Colours: purple / gold / white (diamond-blue-white)
+// ── REALISTIC BRILLIANT-CUT DIAMOND ──
 function Diamond(spread) {{ this.reset(spread); }}
 Diamond.prototype.reset = function(spread) {{
-  this.x  = Math.random() * W;
-  this.y  = spread ? Math.random() * H : -80 - Math.random() * 300;
-  this.s  = 14 + Math.random() * 34;        // size
-  this.vy = 0.18 + Math.random() * 0.45;
-  this.vx = (Math.random() - 0.5) * 0.22;
+  this.x = Math.random() * W;
+  this.y = spread ? Math.random() * H : -80 - Math.random() * 300;
+  this.s = 18 + Math.random() * 40;
+  this.vy = 0.16 + Math.random() * 0.42;
+  this.vx = (Math.random() - 0.5) * 0.2;
   this.rot = Math.random() * Math.PI * 2;
   this.rv  = (Math.random() - 0.5) * 0.006;
   this.sparkPhase = Math.random() * Math.PI * 2;
   var r = Math.random();
-  // purple 50%, white 30%, gold 20%
-  this.col = r < 0.50 ? 'purple' : (r < 0.80 ? 'white' : 'gold');
-  this.op  = 0.18 + Math.random() * 0.38;
+  this.col = r < 0.48 ? 'purple' : (r < 0.78 ? 'white' : 'gold');
+  this.op  = 0.25 + Math.random() * 0.5;
 }};
-Diamond.prototype.update = function(t) {{
+Diamond.prototype.update = function() {{
   this.y += this.vy; this.x += this.vx; this.rot += this.rv;
   if (this.y > H + 90) this.reset(false);
 }};
@@ -756,95 +754,112 @@ Diamond.prototype.draw = function(cx, t) {{
   cx.translate(this.x, this.y);
   cx.rotate(this.rot);
   cx.globalAlpha = this.op;
-
   var s = this.s;
-  // Gem proportions
-  var tw  = s * 0.55;   // table half-width
-  var th  = -s * 0.62;  // table y (crown top)
-  var gw  = s * 0.72;   // girdle half-width
-  var gy  = 0;           // girdle y
-  var cu  = s * 0.92;   // culet y (bottom tip)
 
-  // Colour palette
-  var mainC, glowC, facetC, fillC, hlC;
+  // Brilliant-cut proportions (front/slight-angle view)
+  var tw = s * 0.58, ty = -s * 0.50;  // table: half-width, y
+  var gw = s * 0.80, gy =  s * 0.08;  // girdle: half-width, y
+  var cu = s * 0.96;                    // culet y (bottom tip)
+  var mx = gw * 0.44;                   // mid-girdle division x
+  var td = tw * 0.40;                   // crown inner division x
+
+  // Per-colour palettes: dk=darkest dm=dark-mid lm=light-mid lt=lightest
+  var dk, dm, lm, lt, glowC, edC, glC;
   if (this.col === 'purple') {{
-    mainC  = '#9B30FF'; glowC = 'rgba(155,48,255,0.9)';
-    facetC = 'rgba(199,125,255,0.45)'; fillC = 'rgba(30,0,60,0.82)';
-    hlC    = 'rgba(220,180,255,0.55)';
+    dk='rgba(12,0,30,0.97)';  dm='rgba(50,0,110,0.93)';
+    lm='rgba(130,50,215,0.88)'; lt='rgba(210,155,255,0.92)';
+    glowC='rgba(155,48,255,0.9)'; edC='#9B30FF'; glC='#F0DFFF';
   }} else if (this.col === 'white') {{
-    mainC  = '#DCF0FF'; glowC = 'rgba(200,230,255,0.9)';
-    facetC = 'rgba(255,255,255,0.4)';  fillC = 'rgba(5,10,25,0.75)';
-    hlC    = 'rgba(255,255,255,0.75)';
+    // White/clear diamond: near-black interior, ice-blue/white reflections
+    dk='rgba(2,4,12,0.98)';   dm='rgba(8,15,38,0.94)';
+    lm='rgba(130,185,235,0.88)'; lt='rgba(220,240,255,0.94)';
+    glowC='rgba(190,220,255,0.82)'; edC='#B8D8FF'; glC='#FFFFFF';
   }} else {{
-    mainC  = '#FFD700'; glowC = 'rgba(255,215,0,0.9)';
-    facetC = 'rgba(255,235,100,0.45)'; fillC = 'rgba(30,20,0,0.82)';
-    hlC    = 'rgba(255,245,180,0.65)';
+    dk='rgba(28,10,0,0.97)';  dm='rgba(90,42,0,0.93)';
+    lm='rgba(205,145,8,0.88)'; lt='rgba(255,230,95,0.92)';
+    glowC='rgba(255,215,0,0.9)'; edC='#FFD700'; glC='#FFFCE0';
   }}
 
-  // ── 1. PAVILION fill (bottom half) ──
-  cx.beginPath();
-  cx.moveTo(-gw, gy); cx.lineTo(gw, gy); cx.lineTo(0, cu); cx.closePath();
-  cx.fillStyle = fillC; cx.fill();
+  // Helpers
+  function grd(x0,y0,x1,y1,c0,c1) {{
+    var g = cx.createLinearGradient(x0,y0,x1,y1);
+    g.addColorStop(0,c0); g.addColorStop(1,c1); return g;
+  }}
+  function quad(ax,ay,bx,by,px,py,qx,qy,fill) {{
+    cx.beginPath(); cx.moveTo(ax,ay); cx.lineTo(bx,by); cx.lineTo(px,py); cx.lineTo(qx,qy);
+    cx.closePath(); cx.fillStyle=fill; cx.fill();
+  }}
+  function tri(ax,ay,bx,by,px,py,fill) {{
+    cx.beginPath(); cx.moveTo(ax,ay); cx.lineTo(bx,by); cx.lineTo(px,py);
+    cx.closePath(); cx.fillStyle=fill; cx.fill();
+  }}
 
-  // ── 2. CROWN fill (top half) ──
-  cx.beginPath();
-  cx.moveTo(-tw, th); cx.lineTo(tw, th);
-  cx.lineTo(gw, gy);  cx.lineTo(-gw, gy); cx.closePath();
-  cx.fillStyle = fillC; cx.fill();
+  // ── CROWN: 4 filled quadrilateral facets ──
+  // Alternate dark/light to simulate angled planes catching different light
+  quad(-tw,ty, -gw,gy, -mx,gy, -td,ty, grd(-gw,gy,-td,ty,dm,dk));   // far-left  (dark)
+  quad(-td,ty, -mx,gy,  0,gy,   0,ty,  grd(-mx,gy,0,ty,lm,lt));     // near-left (light)
+  quad(  0,ty,   0,gy, mx,gy,  td,ty,  grd(0,gy,td,ty,dm,dk));      // near-right(dark)
+  quad( td,ty,  mx,gy, gw,gy,  tw,ty,  grd(mx,gy,tw,ty,lm,lt));     // far-right (light)
 
-  // ── 3. Glow outline ──
-  cx.shadowColor = glowC; cx.shadowBlur = 14;
-  cx.strokeStyle = mainC; cx.lineWidth = 1.2;
+  // ── TABLE: reflective flat top ──
+  var tg = cx.createLinearGradient(-tw,ty,tw,ty);
+  tg.addColorStop(0,lt); tg.addColorStop(0.28,dk); tg.addColorStop(0.55,lt); tg.addColorStop(1,dm);
+  quad(-tw,ty, -td,ty, td,ty, tw,ty, tg);  // degenerate line — table is just the top edge,
+  // draw it as a thin strip:
+  cx.beginPath(); cx.moveTo(-tw,ty); cx.lineTo(tw,ty);
+  cx.strokeStyle=glC; cx.lineWidth=2.0; cx.stroke();
 
-  // Outer silhouette
+  // ── PAVILION: 4 filled triangular facets ──
+  tri(-gw,gy, -mx,gy,  0,cu, grd(-gw,gy,0,cu,lm,dk));   // far-left  (light→dark)
+  tri(-mx,gy,   0,gy,  0,cu, grd(-mx,gy,0,cu,lt,lm));    // near-left (bright)
+  tri(  0,gy,  mx,gy,  0,cu, grd(0,gy,mx,gy,dk,lm));     // near-right(dark→mid)
+  tri( mx,gy,  gw,gy,  0,cu, grd(mx,gy,0,cu,dm,lt));     // far-right (mid→light)
+
+  // ── GLOW SILHOUETTE ──
+  cx.shadowColor=glowC; cx.shadowBlur=18;
+  cx.strokeStyle=edC; cx.lineWidth=1.1;
   cx.beginPath();
-  cx.moveTo(-tw, th); cx.lineTo(tw, th);
-  cx.lineTo(gw, gy);  cx.lineTo(0, cu);
-  cx.lineTo(-gw, gy); cx.closePath();
+  cx.moveTo(-tw,ty); cx.lineTo(tw,ty);
+  cx.lineTo(gw,gy); cx.lineTo(0,cu); cx.lineTo(-gw,gy); cx.closePath();
   cx.stroke();
-  cx.shadowBlur = 0;
+  cx.shadowBlur=0;
 
-  // ── 4. Table top edge ──
-  cx.beginPath(); cx.moveTo(-tw, th); cx.lineTo(tw, th);
-  cx.strokeStyle = hlC; cx.lineWidth = 1.5; cx.stroke();
+  // ── INTERIOR FACET LINES ──
+  cx.globalAlpha = this.op * 0.48;
+  cx.strokeStyle = edC; cx.lineWidth = 0.55;
+  [[-td,ty,-mx,gy],[0,ty,0,gy],[td,ty,mx,gy],[-mx,gy,0,cu],[mx,gy,0,cu]].forEach(function(l) {{
+    cx.beginPath(); cx.moveTo(l[0],l[1]); cx.lineTo(l[2],l[3]); cx.stroke();
+  }});
 
-  // ── 5. Crown facets (star pattern from table corners to girdle) ──
-  cx.strokeStyle = facetC; cx.lineWidth = 0.7;
-  // left crown facet
-  cx.beginPath(); cx.moveTo(-tw, th); cx.lineTo(-gw*0.5, gy); cx.stroke();
-  // right crown facet
-  cx.beginPath(); cx.moveTo(tw, th); cx.lineTo(gw*0.5, gy); cx.stroke();
-  // centre crown ridge
-  cx.beginPath(); cx.moveTo(0, th); cx.lineTo(0, gy); cx.stroke();
-  // upper-left to girdle
-  cx.beginPath(); cx.moveTo(-tw*0.4, th); cx.lineTo(-gw, gy); cx.stroke();
-  // upper-right to girdle
-  cx.beginPath(); cx.moveTo(tw*0.4, th); cx.lineTo(gw, gy); cx.stroke();
+  // Girdle bright line
+  cx.globalAlpha = this.op;
+  cx.strokeStyle = edC; cx.lineWidth = 1.1;
+  cx.beginPath(); cx.moveTo(-gw,gy); cx.lineTo(gw,gy); cx.stroke();
 
-  // ── 6. Pavilion facets ──
-  cx.strokeStyle = facetC; cx.lineWidth = 0.7;
-  // left pavilion ridge
-  cx.beginPath(); cx.moveTo(-gw*0.5, gy); cx.lineTo(0, cu); cx.stroke();
-  // right pavilion ridge
-  cx.beginPath(); cx.moveTo(gw*0.5, gy); cx.lineTo(0, cu); cx.stroke();
-  // cross pavilion
-  cx.beginPath(); cx.moveTo(-gw, gy); cx.lineTo(0, cu*0.55); cx.stroke();
-  cx.beginPath(); cx.moveTo(gw, gy); cx.lineTo(0, cu*0.55); cx.stroke();
-  // girdle mid line
-  cx.beginPath(); cx.moveTo(-gw, gy); cx.lineTo(gw, gy);
-  cx.strokeStyle = mainC; cx.lineWidth = 0.9; cx.stroke();
+  // ── EDGE HIGHLIGHTS (simulate key light) ──
+  cx.strokeStyle = glC;
+  cx.lineWidth = 1.6;
+  cx.beginPath(); cx.moveTo(tw,ty); cx.lineTo(gw,gy); cx.stroke();  // right crown edge
+  cx.lineWidth = 1.1;
+  cx.beginPath(); cx.moveTo(-gw,gy); cx.lineTo(0,cu); cx.stroke(); // left pavilion edge
 
-  // ── 7. Animated sparkle flash on table ──
-  var spark = (Math.sin(t * 0.003 + this.sparkPhase) + 1) * 0.5;
-  if (spark > 0.7) {{
-    cx.globalAlpha = this.op * spark * 0.9;
-    var sx = (Math.random() - 0.5) * tw * 0.8;
-    var sy = th + Math.abs(Math.random() * (gy - th) * 0.4);
-    cx.strokeStyle = hlC; cx.lineWidth = 0.8;
-    var ss = s * 0.08;
-    // cross-hair sparkle
-    cx.beginPath(); cx.moveTo(sx-ss, sy); cx.lineTo(sx+ss, sy); cx.stroke();
-    cx.beginPath(); cx.moveTo(sx, sy-ss); cx.lineTo(sx, sy+ss); cx.stroke();
+  // Culet glint
+  cx.lineWidth = 1.5;
+  var cg = s*0.04;
+  cx.beginPath(); cx.moveTo(-cg,cu); cx.lineTo(cg,cu); cx.stroke();
+
+  // ── 4-POINTED SPARKLE FLASH ──
+  var flash = (Math.sin(t*0.003 + this.sparkPhase) + 1) * 0.5;
+  if (flash > 0.64) {{
+    cx.globalAlpha = this.op * ((flash-0.64)/0.36);
+    cx.strokeStyle = glC;
+    var ss = s*0.16, spx = tw*0.22, spy = ty + s*0.05;
+    cx.lineWidth = 1.1;
+    cx.beginPath(); cx.moveTo(spx-ss,spy); cx.lineTo(spx+ss,spy); cx.stroke();
+    cx.beginPath(); cx.moveTo(spx,spy-ss*0.75); cx.lineTo(spx,spy+ss*0.75); cx.stroke();
+    cx.lineWidth = 0.55;
+    cx.beginPath(); cx.moveTo(spx-ss*0.6,spy-ss*0.6); cx.lineTo(spx+ss*0.6,spy+ss*0.6); cx.stroke();
+    cx.beginPath(); cx.moveTo(spx+ss*0.6,spy-ss*0.6); cx.lineTo(spx-ss*0.6,spy+ss*0.6); cx.stroke();
   }}
 
   cx.restore();
