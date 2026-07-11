@@ -128,11 +128,12 @@ async def webhook(request: Request):
         ai_confidence = 0.5
 
     # Score signal
-    scored = score_signal(symbol, direction, strategy, timeframe, ai_confidence)
-    log.info(f"Signal scored {scored:.2f} | {symbol} {direction} {strategy} | AI conf={ai_confidence:.2f}")
+    scored     = score_signal(symbol, direction, strategy, timeframe, ai_confidence)
+    score_total = scored["total"]
+    log.info(f"Signal scored {score_total:.2f} | {symbol} {direction} {strategy} | AI conf={ai_confidence:.2f}")
 
-    if scored < 6.5:
-        return JSONResponse({"status": "ignored", "reason": f"score too low ({scored:.2f})"})
+    if score_total < 6.5:
+        return JSONResponse({"status": "ignored", "reason": f"score too low ({score_total:.2f})"})
 
     # Execute trade
     try:
@@ -142,24 +143,24 @@ async def webhook(request: Request):
             strategy=strategy,
             timeframe=timeframe,
             price=price,
-            score=scored,
+            score=score_total,
         )
         memory.record_signal(
             symbol=symbol,
             direction=direction,
             strategy=strategy,
             timeframe=timeframe,
-            score=scored,
+            score=score_total,
             trade_id=trade.get("trade_id"),
             regime=ai_result.get("regime", "unknown"),
         )
         await send_trade_alert(
             trade=trade,
-            score={"total": scored},
+            score=scored,
             ai_result=ai_result,
         )
         log.info(f"Trade opened: {trade}")
-        return JSONResponse({"status": "executed", "trade": trade, "score": scored})
+        return JSONResponse({"status": "executed", "trade": trade, "score": score_total})
     except Exception as e:
         log.error(f"Trade execution failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
