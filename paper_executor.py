@@ -83,9 +83,12 @@ class PaperExecutor:
         strategy: str,
         score: float,
         ai_reasoning: str = "",
+        timeframe: str = "5m",
+        sizing_multiplier: float = 1.0,
     ) -> dict:
         trade_id   = str(uuid.uuid4())[:8].upper()
-        risk_pct   = self._calc_risk(score)
+        risk_pct   = round(self._calc_risk(score) * sizing_multiplier, 2)
+        risk_pct   = max(0.25, min(3.0, risk_pct))
         risk_usd   = round(ACCOUNT_SIZE * (risk_pct / 100), 2)
         rr         = DEFAULT_RR.get(symbol, 2.0)
         entry_time = datetime.utcnow().isoformat()
