@@ -112,3 +112,110 @@ async def webhook(request: Request):
     strategy  = signal.get("strategy", "unknown")
     timeframe = signal.get("timeframe", "5m")
     price     = float(signal.get("price", 0))
+
+    # AI brain evaluation
+    context = {
+        "open_trades": executor.get_open_count(),
+        "mode": MODE,
+        "phase": PHASE,
+    }
+    try:
+        ai_result = await evaluate_signal(symbol, direction, price, strategy, timeframe, context)
+        ai_confidence = ai_result.get("confidence", 0.5)
+    except Exception as e:
+        log.warning(f"AI brain failed: {e}")
+        ai_result = {"confidence": 0.5, "regime": "unknown", "reasoning": str(e)}
+        ai_confidence = 0.5
+
+    # Score signal
+    scored = score_signal(symbol, direction, strategy, timeframe, ai_confidence)
+    log.info(f"Signal scored {scored:.2f} | {symbol} {direction} {strategy} | AI conf={ai_confidence:.2f}")
+
+    if scored < 6.5:
+        return JSONResponse({"status": "ignored", "reason": f"score too low ({scored:.2f})"})
+
+    # Execute trade
+    try:
+        trade = executor.open_trade(
+            symbol=symbol,
+            direction=direction,
+            strategy=strategy,
+            timeframe=timeframe,
+            price=price,
+            score=scored,
+        )
+        memory.record_signal(
+            symbol=symbol,
+            direction=direction,
+            strategy=strategy,
+            timeframe=timeframe,
+            score=scored,
+            trade_id=trade.get("trade_id"),
+            regime=ai_result.get("regime", "unknown"),
+        )
+        await send_trade_alert(
+            symbol=symbol,
+            direction=direction,
+            strategy=strategy,
+            price=price,
+            score=scored,
+            ai_confidence=ai_confidence,
+            trade_id=trade.get("trade_id"),
+        )
+        log.info(f"Trade opened: {trade}")
+        return JSONResponse({"status": "executed", "trade": trade, "score": scored})
+    except Exception as e:
+        log.error(f"Trade execution failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/outcome")
+async def outcome(request: Request):
+    """Label a trade WIN / LOSS / BE after the fact."""
+    body = await request.body()
+    try:
+        data = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    trade_id = data.get("trade_id")
+    result   = data.get("result", "").upper()
+    pnl      = float(data.get("pnl", 0))
+
+    if not trade_id or result not in ("WIN", "LOSS", "BE"):
+        raise HTTPException(status_code=400, detail="trade_id and result (WIN/LOSS/BE) required")
+
+    try:
+        labeler.label(trade_id=trade_id, result=result, pnl=pnl)
+        return JSONResponse({"status": "labelled", "trade_id": trade_id, "result": result})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health")
+async def health():
+    ft = FeeTracker()
+    cb = ft.get_circuit_breaker_status()
+    ft.close()
+    return JSONResponse({
+        "status":          "ok",
+        "mode":            MODE,
+        "phase":           PHASE,
+        "open_trades":     executor.get_open_count(),
+        "circuit_breaker": cb["status"],
+        "cb_reason":       cb["reason"],
+    })
+
+
+@app.get("/trades")
+async def trades():
+    return JSONResponse(executor.get_open_trades())
+
+
+@app.get("/stats")
+async def stats():
+    try:
+        session_stats = executor.get_session_stats()
+        return JSONResponse(session_stats)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
