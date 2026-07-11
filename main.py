@@ -306,6 +306,42 @@ async def dashboard():
 
     now_str = datetime.utcnow().strftime("%Y.%m.%d  %H:%M:%S UTC")
 
+    # Pre-compute conditional HTML blocks (can't use backslash escapes inside f-string {})
+    if not trades_open:
+        positions_html = '<div style="color:var(--dim);font-size:.73rem;letter-spacing:2px;padding:16px 0;font-family:Share Tech Mono,monospace">NO ACTIVE POSITIONS</div>'
+    else:
+        positions_html = (
+            '<div class="table-wrap"><table>'
+            '<thead><tr><th>ID</th><th>SYMBOL</th><th>DIRECTION</th><th>STRATEGY</th><th>ENTRY</th><th>SCORE</th><th>OPENED</th></tr></thead>'
+            f'<tbody>{open_rows}</tbody>'
+            '</table></div>'
+        )
+
+    if market_open:
+        countdown_html = ""
+    else:
+        countdown_html = """
+<div class="section-label">MARKETS REOPEN IN</div>
+<div class="countdown-wrap">
+  <div class="countdown-num" id="countdown">--:--:--</div>
+  <div class="countdown-label">UNTIL SUNDAY 23:00 UTC<br>ALL AGENTS STANDING BY<br>CREDITS CONSERVED</div>
+</div>
+<script>
+function getSecsUntilOpen() {
+  var now = new Date(); var day = now.getUTCDay();
+  var target = new Date(now);
+  if (day === 6) { target.setUTCDate(target.getUTCDate() + 1); }
+  target.setUTCHours(23, 0, 0, 0);
+  return Math.max(0, Math.floor((target - now) / 1000));
+}
+function fmt(s) {
+  var h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+  return [h,m,sec].map(function(x) { return String(x).padStart(2,'0'); }).join(':');
+}
+function tick() { var el = document.getElementById('countdown'); if(el) el.textContent = fmt(getSecsUntilOpen()); }
+tick(); setInterval(tick, 1000);
+</script>"""
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -673,36 +709,9 @@ footer::before {{
 
 <!-- OPEN POSITIONS -->
 <div class="section-label">OPEN POSITIONS</div>
-{'<div style="color:var(--dim);font-size:.73rem;letter-spacing:2px;padding:16px 0;font-family:Share Tech Mono,monospace">NO ACTIVE POSITIONS</div>' if not trades_open else f\'\'\'<div class="table-wrap"><table>
-  <thead><tr>
-    <th>ID</th><th>SYMBOL</th><th>DIRECTION</th><th>STRATEGY</th><th>ENTRY</th><th>SCORE</th><th>OPENED</th>
-  </tr></thead>
-  <tbody>{open_rows}</tbody>
-</table></div>\'\'\'}
+{positions_html}
 
-{"" if market_open else \'\'\'
-<div class="section-label">MARKETS REOPEN IN</div>
-<div class="countdown-wrap">
-  <div class="countdown-num" id="countdown">--:--:--</div>
-  <div class="countdown-label">UNTIL SUNDAY 23:00 UTC<br>ALL AGENTS STANDING BY<br>CREDITS CONSERVED</div>
-</div>
-<script>
-function getSecsUntilOpen() {
-  var now = new Date();
-  var day = now.getUTCDay();
-  var target = new Date(now);
-  if (day === 6) { target.setUTCDate(target.getUTCDate() + 1); }
-  target.setUTCHours(23, 0, 0, 0);
-  return Math.max(0, Math.floor((target - now) / 1000));
-}
-function fmt(s) {
-  var h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
-  return [h,m,sec].map(function(x) { return String(x).padStart(2,'0'); }).join(':');
-}
-function tick() { var el = document.getElementById('countdown'); if(el) el.textContent = fmt(getSecsUntilOpen()); }
-tick(); setInterval(tick, 1000);
-</script>
-\'\'\'}
+{countdown_html}
 
 <!-- FOOTER -->
 <footer>
