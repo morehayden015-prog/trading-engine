@@ -154,13 +154,9 @@ async def webhook(request: Request):
             regime=ai_result.get("regime", "unknown"),
         )
         await send_trade_alert(
-            symbol=symbol,
-            direction=direction,
-            strategy=strategy,
-            price=price,
-            score=scored,
-            ai_confidence=ai_confidence,
-            trade_id=trade.get("trade_id"),
+            trade=trade,
+            score={"total": scored},
+            ai_result=ai_result,
         )
         log.info(f"Trade opened: {trade}")
         return JSONResponse({"status": "executed", "trade": trade, "score": scored})
