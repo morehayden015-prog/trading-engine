@@ -27,6 +27,7 @@ from fee_tracker import FeeTracker
 from outcome_labeler import OutcomeLabeler
 from auto_calibrate import calibration_loop
 from daily_briefing import briefing_scheduler
+from auto_labeler import auto_label_loop
 
 load_dotenv()
 
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(start_scanner())
     asyncio.create_task(calibration_loop())
     asyncio.create_task(briefing_scheduler())
+    asyncio.create_task(auto_label_loop(executor, labeler))
     yield
     executor.close()
     memory.close()
@@ -183,7 +185,7 @@ async def outcome(request: Request):
         raise HTTPException(status_code=400, detail="trade_id and result (WIN/LOSS/BE) required")
 
     try:
-        labeler.label(trade_id=trade_id, result=result, pnl=pnl)
+        labeler.label_manual(trade_id=trade_id, result=result, exit_price=pnl)
         return JSONResponse({"status": "labelled", "trade_id": trade_id, "result": result})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
