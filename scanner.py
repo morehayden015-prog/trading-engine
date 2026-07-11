@@ -503,4 +503,9 @@ async def start_scanner():
         try:
             await run_single_scan()
         except Exception as e:
-            print(f"[scanner] sca
+            print(f"[scanner] scan loop error: {e}")
+        await asyncio.sleep(SCAN_INTERVAL)
+
+
+if __name__ == "__main__":
+    asyncio.run(run_single_scan())

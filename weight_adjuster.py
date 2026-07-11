@@ -145,24 +145,16 @@ def run_adjustment():
     """
     print(f"\n[ADJUSTER] Starting weight adjustment — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Step 1: Run analysis
     performance = run_analysis()
 
     if not performance:
         print("[ADJUSTER] No performance data available. Skipping adjustment.")
         return
 
-    # Step 2: Load current weights
     current_weights = load_weights()
-
-    # Step 3: Apply adjustments
     updated_weights, changes = apply_adjustments(current_weights, performance)
-
-    # Step 4: Save updated weights
     save_weights(updated_weights)
     print(f"\n[ADJUSTER] Weights saved to {WEIGHTS_FILE}")
-
-    # Step 5: Return changes for learning logger
     return changes
 
 
