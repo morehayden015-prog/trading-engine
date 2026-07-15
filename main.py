@@ -100,7 +100,7 @@ def _check_admin_auth(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 # ── Dashboard passcode auth ──
-DASHBOARD_PASSCODE   = "8462"
+DASHBOARD_PASSCODE   = os.getenv("DASHBOARD_PASSCODE", "8462")
 DASHBOARD_SECRET_KEY = os.getenv("DASHBOARD_SECRET_KEY", "bot-secret-key")
 SESSION_COOKIE_NAME  = "dashboard_session"
 SESSION_MAX_AGE      = 60 * 60 * 24 * 7  # 7 days
@@ -186,6 +186,11 @@ async def lifespan(app: FastAPI):
         f"Starting Hayden Multi-Market Bot | MODE={MODE.upper()} | PHASE={PHASE} "
         f"| Symbols={ALLOWED_SYMBOLS} | Port=8000"
     )
+    if DASHBOARD_SECRET_KEY == "bot-secret-key":
+        log.warning(
+            "DASHBOARD_SECRET_KEY is still the default 'bot-secret-key'. "
+            "Set a strong DASHBOARD_SECRET_KEY env var to secure dashboard sessions."
+        )
     asyncio.create_task(intel_agent_loop())
     asyncio.create_task(regime_agent_loop())
     asyncio.create_task(risk_agent_loop())
@@ -470,25 +475,33 @@ async def login_form(request: Request):
 
 @app.post("/login")
 async def login_submit(request: Request):
-    form = await request.form()
-    passcode = form.get("passcode", "")
+    try:
+        form = await request.form()
+        passcode = form.get("passcode", "")
 
-    if passcode != DASHBOARD_PASSCODE:
-        error_html = '<div class="error">INCORRECT PASSCODE</div>'
+        if passcode != DASHBOARD_PASSCODE:
+            error_html = '<div class="error">INCORRECT PASSCODE</div>'
+            return HTMLResponse(
+                content=LOGIN_PAGE_HTML.format(error_html=error_html),
+                status_code=401,
+            )
+
+        response = RedirectResponse(url="/dashboard", status_code=303)
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=_make_session_token(),
+            max_age=SESSION_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+        )
+        return response
+    except Exception:
+        log.exception("Login handler failed")
+        error_html = '<div class="error">LOGIN ERROR &mdash; TRY AGAIN</div>'
         return HTMLResponse(
             content=LOGIN_PAGE_HTML.format(error_html=error_html),
-            status_code=401,
+            status_code=500,
         )
-
-    response = RedirectResponse(url="/dashboard", status_code=303)
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=_make_session_token(),
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-    )
-    return response
 
 
 @app.get("/logout")
