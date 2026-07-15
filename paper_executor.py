@@ -25,6 +25,11 @@ DEFAULT_RR = {
     "ES":     2.5,
     "NQ":     3.0,
     "CL":     2.0,
+    # Forex majors — tighter scalp RR
+    "EURUSD": 1.5,
+    "GBPUSD": 1.5,
+    "USDJPY": 1.5,
+    "AUDUSD": 1.5,
 }
 
 
@@ -165,8 +170,3 @@ class PaperExecutor:
         win_rate = round(wins / total, 3) if total > 0 else None
         return {
             "total": total, "wins": wins, "losses": losses,
-            "win_rate": win_rate, "total_pnl": total_pl,
-        }
-
-    def close(self):
-        self.conn.close()

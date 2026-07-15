@@ -23,9 +23,11 @@ ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "10000"))
 
 # Correlated market groups — being long/short in same group = correlated risk
 CORRELATED_GROUPS = [
-    {"ES", "NQ"},           # US equities
-    {"XAUUSD"},             # Gold (standalone)
-    {"CL"},                 # Oil (standalone)
+    {"ES", "NQ"},                       # US equities
+    {"XAUUSD"},                         # Gold (standalone)
+    {"CL"},                             # Oil (standalone)
+    {"EURUSD", "GBPUSD", "AUDUSD"},     # Risk-on / anti-USD majors — move together
+    {"USDJPY"},                         # Risk-off currency pair, behaves differently
 ]
 
 
@@ -196,12 +198,4 @@ async def risk_agent_loop():
                         f"**Daily P&L:** ${daily_pnl:+.2f}\n"
                         f"**Weekly P&L:** ${weekly_pnl:+.2f}\n"
                         f"**Position Sizing:** {sizing}x base risk\n\n"
-                        f"Bot is in risk-reduction mode.",
-                    )
-                except Exception:
-                    pass
-
-        except Exception as e:
-            log.error(f"Risk agent error: {e}")
-
-        await asyncio.sleep(60)
+                        f"Bot is in risk-redu

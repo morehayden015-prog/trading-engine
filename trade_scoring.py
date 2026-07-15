@@ -15,6 +15,11 @@ SESSION_SCORES = {
     "ES":     {"ASIAN": 3, "LONDON": 5, "NY_OPEN": 10, "NY_AFTERNOON": 8, "NY_CLOSE": 5},
     "NQ":     {"ASIAN": 3, "LONDON": 5, "NY_OPEN": 10, "NY_AFTERNOON": 8, "NY_CLOSE": 5},
     "CL":     {"ASIAN": 4, "LONDON": 8, "NY_OPEN": 9,  "NY_AFTERNOON": 7, "NY_CLOSE": 4},
+    # Forex majors — EUR/GBP peak on the London/NY overlap; JPY/AUD favor Asian session
+    "EURUSD": {"ASIAN": 4, "LONDON": 10, "NY_OPEN": 9, "NY_AFTERNOON": 5, "NY_CLOSE": 3},
+    "GBPUSD": {"ASIAN": 4, "LONDON": 10, "NY_OPEN": 9, "NY_AFTERNOON": 5, "NY_CLOSE": 3},
+    "USDJPY": {"ASIAN": 8, "LONDON": 6,  "NY_OPEN": 8, "NY_AFTERNOON": 5, "NY_CLOSE": 4},
+    "AUDUSD": {"ASIAN": 9, "LONDON": 5,  "NY_OPEN": 6, "NY_AFTERNOON": 4, "NY_CLOSE": 4},
 }
 
 # ── Strategy base scores ──────────────────────────────────────────────────────
@@ -29,11 +34,11 @@ STRATEGY_BASE = {
 
 # ── Strategy best markets ─────────────────────────────────────────────────────
 STRATEGY_MARKETS = {
-    "sweep_bos_fvg":  ["XAUUSD"],
-    "rp_profits":     ["ES", "NQ", "XAUUSD"],
-    "ict_5step":      ["ES", "NQ", "XAUUSD"],
+    "sweep_bos_fvg":  ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
+    "rp_profits":     ["ES", "NQ", "XAUUSD", "EURUSD", "GBPUSD"],
+    "ict_5step":      ["ES", "NQ", "XAUUSD", "EURUSD", "GBPUSD"],
     "orb_scalp":      ["ES", "NQ", "CL"],
-    "supply_demand":  ["XAUUSD", "CL", "ES", "NQ"],
+    "supply_demand":  ["XAUUSD", "CL", "ES", "NQ", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
     "mamba_scalp":    ["NQ", "ES"],
 }
 
@@ -120,24 +125,4 @@ def score_session(session: str, symbol: str) -> int:
 
 def score_dxy(direction: str, symbol: str) -> float:
     """
-    Simple DXY alignment heuristic.
-    Gold and Oil are inversely correlated to DXY.
-    Equities are mildly inversely correlated.
-    """
-    inverse = {"XAUUSD", "CL"}
-    if symbol in inverse:
-        return 1.1 if direction == "SHORT" else 0.9
-    return 1.0
-
-
-def _get_session(utc_hour: int) -> str:
-    if 22 <= utc_hour or utc_hour < 7:
-        return "ASIAN"
-    elif 7 <= utc_hour < 12:
-        return "LONDON"
-    elif 12 <= utc_hour < 17:
-        return "NY_OPEN"
-    elif 17 <= utc_hour < 20:
-        return "NY_AFTERNOON"
-    else:
-        return "NY_CLOSE"
+  

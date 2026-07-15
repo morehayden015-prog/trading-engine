@@ -1,6 +1,6 @@
 """
 main.py — Hayden Multi-Market Trading Bot
-Webhook server entry point for XAUUSD, ES, NQ, CL
+Webhook server entry point for XAUUSD, ES, NQ, CL, EURUSD, GBPUSD, USDJPY, AUDUSD
 MODE=paper | PHASE=2
 """
 import os
@@ -13,8 +13,9 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from dotenv import load_dotenv
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from ai_brain import evaluate_signal
 from trade_scoring import score_signal
@@ -52,9 +53,85 @@ log = logging.getLogger(__name__)
 
 MODE            = os.getenv("MODE", "paper").lower()
 PHASE           = int(os.getenv("PHASE", "2"))
-ALLOWED_SYMBOLS = set(os.getenv("ALLOWED_SYMBOLS", "XAUUSD,ES,NQ,CL").split(","))
+ALLOWED_SYMBOLS = set(os.getenv("ALLOWED_SYMBOLS", "XAUUSD,ES,NQ,CL,EURUSD,GBPUSD,USDJPY,AUDUSD").split(","))
 MAX_CONCURRENT  = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
 WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET", "hayden_private_key")
+
+# ── Dashboard passcode auth ──
+DASHBOARD_PASSCODE   = "8462"
+DASHBOARD_SECRET_KEY = os.getenv("DASHBOARD_SECRET_KEY", "bot-secret-key")
+SESSION_COOKIE_NAME  = "dashboard_session"
+SESSION_MAX_AGE      = 60 * 60 * 24 * 7  # 7 days
+_serializer = URLSafeTimedSerializer(DASHBOARD_SECRET_KEY)
+
+
+def _make_session_token() -> str:
+    return _serializer.dumps({"auth": True})
+
+
+def _has_valid_session(request: Request) -> bool:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        return False
+    try:
+        data = _serializer.loads(token, max_age=SESSION_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return False
+    return bool(data.get("auth"))
+
+
+LOGIN_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SNUTS // LOGIN</title>
+<style>
+* {{ box-sizing:border-box; margin:0; padding:0; }}
+body {{
+  background:#050008; color:#DCC8FF; font-family:'Courier New',monospace;
+  min-height:100vh; display:flex; align-items:center; justify-content:center;
+}}
+.login-box {{
+  background:#0D0015; border:1px solid rgba(168,85,247,0.35);
+  padding:40px 36px; width:100%; max-width:340px; text-align:center;
+}}
+.login-title {{
+  font-size:1.1rem; letter-spacing:4px; color:#fff; margin-bottom:6px;
+  text-shadow:0 0 20px rgba(168,85,247,0.7);
+}}
+.login-sub {{
+  font-size:.65rem; letter-spacing:2px; color:#a855f7; margin-bottom:28px;
+}}
+input[type="password"] {{
+  width:100%; background:#150025; border:1px solid rgba(168,85,247,0.4);
+  color:#DCC8FF; font-family:'Courier New',monospace; font-size:1.1rem;
+  letter-spacing:6px; text-align:center; padding:12px; margin-bottom:18px;
+  outline:none;
+}}
+input[type="password"]:focus {{ border-color:#a855f7; box-shadow:0 0 10px rgba(168,85,247,0.4); }}
+button {{
+  width:100%; background:#a855f7; color:#050008; border:none; padding:12px;
+  font-family:'Courier New',monospace; font-size:.8rem; letter-spacing:3px;
+  font-weight:bold; cursor:pointer;
+}}
+button:hover {{ background:#c084fc; }}
+.error {{ color:#FF4757; font-size:.7rem; letter-spacing:1px; margin-bottom:16px; }}
+</style>
+</head>
+<body>
+<div class="login-box">
+  <div class="login-title">SNUTS</div>
+  <div class="login-sub">ENTER PASSCODE</div>
+  {error_html}
+  <form method="post" action="/login">
+    <input type="password" name="passcode" autofocus autocomplete="off">
+    <button type="submit">UNLOCK</button>
+  </form>
+</div>
+</body>
+</html>"""
+
 
 executor = PaperExecutor()
 memory   = Memory()
@@ -253,13 +330,51 @@ async def agent_context_endpoint():
     return JSONResponse(context.snapshot())
 
 
+@app.get("/login")
+async def login_form(request: Request):
+    return HTMLResponse(content=LOGIN_PAGE_HTML.format(error_html=""))
+
+
+@app.post("/login")
+async def login_submit(request: Request):
+    form = await request.form()
+    passcode = form.get("passcode", "")
+
+    if passcode != DASHBOARD_PASSCODE:
+        error_html = '<div class="error">INCORRECT PASSCODE</div>'
+        return HTMLResponse(
+            content=LOGIN_PAGE_HTML.format(error_html=error_html),
+            status_code=401,
+        )
+
+    response = RedirectResponse(url="/dashboard", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=_make_session_token(),
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/logout")
+async def logout():
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE_NAME)
+    return response
+
+
 @app.get("/dashboard", response_class=None)
-async def dashboard():
-    from fastapi.responses import HTMLResponse
+async def dashboard(request: Request):
+    if not _has_valid_session(request):
+        return RedirectResponse(url="/login", status_code=303)
     ft          = FeeTracker()
     cb          = ft.get_circuit_breaker_status()
     ft.close()
     stats       = executor.get_session_stats()
+    today_stats = executor.get_today_stats()
+    margin      = executor.get_margin_status()
     ctx         = context.snapshot()
     trades_open = executor.get_open_trades()
 
@@ -283,6 +398,25 @@ async def dashboard():
     pnl_clr     = "#FFD700" if total_pnl >= 0 else "#FF4757"
     mkt_clr     = "#9B30FF" if market_open else "#FF4757"
     mkt_txt     = "ONLINE" if market_open else "WEEKEND"
+
+    # Margin usage
+    margin_used     = margin["margin_used"]
+    margin_avail    = margin["margin_available"]
+    margin_pct      = margin["margin_used_pct"]
+    account_size    = margin["account_size"]
+    margin_clr      = "#FF4757" if margin_pct >= 60 else ("#FFD700" if margin_pct >= 30 else "#9B30FF")
+
+    # Today's win/loss bar chart
+    t_wins   = today_stats.get("wins", 0)
+    t_losses = today_stats.get("losses", 0)
+    t_be     = today_stats.get("be", 0)
+    t_total  = today_stats.get("total", 0)
+    t_pnl    = today_stats.get("total_pnl", 0.0)
+    t_pnl_clr = "#FFD700" if t_pnl >= 0 else "#FF4757"
+    t_win_rate_str = f"{today_stats['win_rate']:.0%}" if today_stats.get("win_rate") is not None else "---"
+    bar_max   = max(t_wins, t_losses, 1)
+    win_bar_h  = round((t_wins / bar_max) * 100)
+    loss_bar_h = round((t_losses / bar_max) * 100)
 
     open_rows = ""
     for t in trades_open:
@@ -444,6 +578,49 @@ header::after {{
 .card-label {{ font-size:.63rem; letter-spacing:2px; color:var(--dim); text-transform:uppercase; margin-bottom:10px; font-family:'Share Tech Mono',monospace; }}
 .card-value {{ font-family:'Orbitron',monospace; font-size:1.2rem; font-weight:700; line-height:1; }}
 .card-sub {{ font-size:.65rem; color:var(--dim); margin-top:8px; letter-spacing:1px; font-family:'Share Tech Mono',monospace; }}
+
+/* MARGIN METER */
+.margin-meter-wrap {{ margin-bottom:32px; }}
+.margin-meter-track {{
+  width:100%; height:10px; background:var(--bg2); border:1px solid var(--borderb);
+  overflow:hidden; position:relative;
+}}
+.margin-meter-fill {{
+  height:100%; transition:width .4s ease; box-shadow:0 0 12px currentColor;
+}}
+.margin-meter-label {{ font-size:.6rem; letter-spacing:2px; margin-top:8px; text-align:right; }}
+
+/* WIN/LOSS BAR CHART */
+.chart-wrap {{
+  background:var(--bg2); border:1px solid var(--borderb); padding:24px; margin-bottom:32px;
+  display:flex; align-items:flex-end; gap:0; position:relative;
+  clip-path:polygon(0 0,calc(100% - 16px) 0,100% 16px,100% 100%,0 100%);
+}}
+.chart-wrap::before {{
+  content:''; position:absolute; top:-1px; right:-1px; width:22px; height:22px;
+  border-top:2px solid var(--gold); border-right:2px solid var(--gold);
+}}
+.chart-bars {{ display:flex; align-items:flex-end; gap:36px; height:180px; flex:1; padding-left:8px; }}
+.chart-col {{ display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; width:80px; }}
+.chart-bar {{
+  width:100%; border-radius:2px 2px 0 0; position:relative;
+  transition:height .5s ease; min-height:3px;
+  box-shadow:0 0 16px currentColor;
+}}
+.chart-bar-count {{
+  font-family:'Orbitron',monospace; font-weight:900; font-size:1.1rem;
+  margin-bottom:8px; text-shadow:0 0 10px currentColor;
+}}
+.chart-bar-label {{
+  font-family:'Share Tech Mono',monospace; font-size:.63rem; letter-spacing:2px;
+  color:var(--dim); margin-top:10px;
+}}
+.chart-side {{
+  display:flex; flex-direction:column; gap:14px; padding-left:28px; margin-left:24px;
+  border-left:1px solid var(--border); min-width:150px;
+}}
+.chart-side-label {{ font-size:.6rem; letter-spacing:2px; color:var(--dim); font-family:'Share Tech Mono',monospace; }}
+.chart-side-val {{ font-family:'Orbitron',monospace; font-size:1.05rem; font-weight:700; }}
 
 /* SYMBOL BIAS */
 .sym-row {{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:32px; }}
@@ -639,6 +816,24 @@ footer::before {{
     <div class="card-value glow-gold" style="color:var(--gold)">{sizing}×</div>
     <div class="card-sub">DYNAMIC RISK</div>
   </div>
+  <div class="card">
+    <div class="card-label">Margin Used</div>
+    <div class="card-value" style="color:{margin_clr}">${margin_used:,.2f}</div>
+    <div class="card-sub">{margin_pct:.1f}% OF ${account_size:,.0f}</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Margin Available</div>
+    <div class="card-value" style="color:var(--text)">${margin_avail:,.2f}</div>
+    <div class="card-sub">{margin['open_positions']} POSITION(S) OPEN</div>
+  </div>
+</div>
+
+<!-- MARGIN METER -->
+<div class="margin-meter-wrap">
+  <div class="margin-meter-track">
+    <div class="margin-meter-fill" style="width:{min(margin_pct,100)}%;background:{margin_clr}"></div>
+  </div>
+  <div class="margin-meter-label mono dim">MARGIN UTILIZATION — {margin_pct:.1f}%</div>
 </div>
 
 <!-- AGENT MAP -->
@@ -676,7 +871,7 @@ footer::before {{
     <div class="agent-ping"></div>
     <div class="agent-icon">⊞</div>
     <div class="agent-name">SCANNER</div>
-    <div class="agent-status">16 STRATEGIES<br>4 MARKETS</div>
+    <div class="agent-status">16 STRATEGIES<br>8 MARKETS</div>
     <div class="agent-freq">↻ 5 MIN</div>
   </div>
   <div class="agent-node">
@@ -705,6 +900,29 @@ footer::before {{
 <div class="section-label">SYMBOL INTELLIGENCE</div>
 <div class="sym-row">
 {sym_bias_html if sym_bias_html else '<span style="color:var(--dim);font-size:.73rem;font-family:Share Tech Mono,monospace;letter-spacing:2px">AWAITING REGIME CLASSIFICATION...</span>'}
+</div>
+
+<!-- TODAY'S PERFORMANCE -->
+<div class="section-label">TODAY'S WIN / LOSS</div>
+<div class="chart-wrap">
+  <div class="chart-bars">
+    <div class="chart-col">
+      <div class="chart-bar-count" style="color:#9B30FF">{t_wins}</div>
+      <div class="chart-bar" style="height:{win_bar_h}%;background:#9B30FF;color:#9B30FF"></div>
+      <div class="chart-bar-label">WINS</div>
+    </div>
+    <div class="chart-col">
+      <div class="chart-bar-count" style="color:#FF4757">{t_losses}</div>
+      <div class="chart-bar" style="height:{loss_bar_h}%;background:#FF4757;color:#FF4757"></div>
+      <div class="chart-bar-label">LOSSES</div>
+    </div>
+  </div>
+  <div class="chart-side">
+    <div><div class="chart-side-label">TRADES TODAY</div><div class="chart-side-val" style="color:var(--text)">{t_total}</div></div>
+    <div><div class="chart-side-label">BREAKEVEN</div><div class="chart-side-val" style="color:var(--dim)">{t_be}</div></div>
+    <div><div class="chart-side-label">WIN RATE</div><div class="chart-side-val glow-gold" style="color:var(--gold)">{t_win_rate_str}</div></div>
+    <div><div class="chart-side-label">TODAY P&amp;L</div><div class="chart-side-val" style="color:{t_pnl_clr}">${t_pnl:+.2f}</div></div>
+  </div>
 </div>
 
 <!-- OPEN POSITIONS -->
@@ -799,126 +1017,4 @@ Diamond.prototype.draw = function(cx, t) {{
   quad(-tw,ty, -gw,gy, -mx,gy, -td,ty, grd(-gw,gy,-td,ty,dm,dk));   // far-left  (dark)
   quad(-td,ty, -mx,gy,  0,gy,   0,ty,  grd(-mx,gy,0,ty,lm,lt));     // near-left (light)
   quad(  0,ty,   0,gy, mx,gy,  td,ty,  grd(0,gy,td,ty,dm,dk));      // near-right(dark)
-  quad( td,ty,  mx,gy, gw,gy,  tw,ty,  grd(mx,gy,tw,ty,lm,lt));     // far-right (light)
-
-  // ── TABLE: reflective flat top ──
-  var tg = cx.createLinearGradient(-tw,ty,tw,ty);
-  tg.addColorStop(0,lt); tg.addColorStop(0.28,dk); tg.addColorStop(0.55,lt); tg.addColorStop(1,dm);
-  quad(-tw,ty, -td,ty, td,ty, tw,ty, tg);  // degenerate line — table is just the top edge,
-  // draw it as a thin strip:
-  cx.beginPath(); cx.moveTo(-tw,ty); cx.lineTo(tw,ty);
-  cx.strokeStyle=glC; cx.lineWidth=2.0; cx.stroke();
-
-  // ── PAVILION: 4 filled triangular facets ──
-  tri(-gw,gy, -mx,gy,  0,cu, grd(-gw,gy,0,cu,lm,dk));   // far-left  (light→dark)
-  tri(-mx,gy,   0,gy,  0,cu, grd(-mx,gy,0,cu,lt,lm));    // near-left (bright)
-  tri(  0,gy,  mx,gy,  0,cu, grd(0,gy,mx,gy,dk,lm));     // near-right(dark→mid)
-  tri( mx,gy,  gw,gy,  0,cu, grd(mx,gy,0,cu,dm,lt));     // far-right (mid→light)
-
-  // ── GLOW SILHOUETTE ──
-  cx.shadowColor=glowC; cx.shadowBlur=18;
-  cx.strokeStyle=edC; cx.lineWidth=1.1;
-  cx.beginPath();
-  cx.moveTo(-tw,ty); cx.lineTo(tw,ty);
-  cx.lineTo(gw,gy); cx.lineTo(0,cu); cx.lineTo(-gw,gy); cx.closePath();
-  cx.stroke();
-  cx.shadowBlur=0;
-
-  // ── INTERIOR FACET LINES ──
-  cx.globalAlpha = this.op * 0.48;
-  cx.strokeStyle = edC; cx.lineWidth = 0.55;
-  [[-td,ty,-mx,gy],[0,ty,0,gy],[td,ty,mx,gy],[-mx,gy,0,cu],[mx,gy,0,cu]].forEach(function(l) {{
-    cx.beginPath(); cx.moveTo(l[0],l[1]); cx.lineTo(l[2],l[3]); cx.stroke();
-  }});
-
-  // Girdle bright line
-  cx.globalAlpha = this.op;
-  cx.strokeStyle = edC; cx.lineWidth = 1.1;
-  cx.beginPath(); cx.moveTo(-gw,gy); cx.lineTo(gw,gy); cx.stroke();
-
-  // ── EDGE HIGHLIGHTS (simulate key light) ──
-  cx.strokeStyle = glC;
-  cx.lineWidth = 1.6;
-  cx.beginPath(); cx.moveTo(tw,ty); cx.lineTo(gw,gy); cx.stroke();  // right crown edge
-  cx.lineWidth = 1.1;
-  cx.beginPath(); cx.moveTo(-gw,gy); cx.lineTo(0,cu); cx.stroke(); // left pavilion edge
-
-  // Culet glint
-  cx.lineWidth = 1.5;
-  var cg = s*0.04;
-  cx.beginPath(); cx.moveTo(-cg,cu); cx.lineTo(cg,cu); cx.stroke();
-
-  // ── 4-POINTED SPARKLE FLASH ──
-  var flash = (Math.sin(t*0.003 + this.sparkPhase) + 1) * 0.5;
-  if (flash > 0.64) {{
-    cx.globalAlpha = this.op * ((flash-0.64)/0.36);
-    cx.strokeStyle = glC;
-    var ss = s*0.16, spx = tw*0.22, spy = ty + s*0.05;
-    cx.lineWidth = 1.1;
-    cx.beginPath(); cx.moveTo(spx-ss,spy); cx.lineTo(spx+ss,spy); cx.stroke();
-    cx.beginPath(); cx.moveTo(spx,spy-ss*0.75); cx.lineTo(spx,spy+ss*0.75); cx.stroke();
-    cx.lineWidth = 0.55;
-    cx.beginPath(); cx.moveTo(spx-ss*0.6,spy-ss*0.6); cx.lineTo(spx+ss*0.6,spy+ss*0.6); cx.stroke();
-    cx.beginPath(); cx.moveTo(spx+ss*0.6,spy-ss*0.6); cx.lineTo(spx-ss*0.6,spy+ss*0.6); cx.stroke();
-  }}
-
-  cx.restore();
-}};
-
-var gems = [];
-for (var i = 0; i < 22; i++) {{ gems.push(new Diamond(true)); }}
-
-function drawGrid(t) {{
-  var cols = 24, rows = 16, cw = W/cols, ch = H/rows;
-  c.strokeStyle = 'rgba(61,16,96,0.3)'; c.lineWidth = 0.5;
-  for (var r = 0; r <= rows; r++) {{ c.beginPath(); c.moveTo(0,r*ch); c.lineTo(W,r*ch); c.stroke(); }}
-  for (var col = 0; col <= cols; col++) {{ c.beginPath(); c.moveTo(col*cw,0); c.lineTo(col*cw,H); c.stroke(); }}
-  for (var nr = 2; nr < rows; nr += 4) {{
-    for (var nc = 2; nc < cols; nc += 5) {{
-      var g = (Math.sin(t*0.0008 + nr*1.3 + nc*0.7) + 1) / 2;
-      var useG = (nr + nc) % 3 === 0;
-      c.fillStyle = useG ? 'rgba(255,215,0,' + (g*0.32) + ')' : 'rgba(155,48,255,' + (g*0.38) + ')';
-      c.beginPath(); c.arc(nc*cw, nr*ch, 1.4 + g*0.6, 0, Math.PI*2); c.fill();
-    }}
-  }}
-}}
-
-var beams = [
-  {{ sx:0.22, sp:0.00015, w:110, gold:false }},
-  {{ sx:0.62, sp:0.00009, w:150, gold:true  }},
-  {{ sx:0.88, sp:0.00022, w:80,  gold:false }},
-];
-function drawBeams(t) {{
-  beams.forEach(function(b, i) {{
-    var ox = Math.sin(t*b.sp + i*2.1) * W * 0.11;
-    var bx = W*b.sx + ox;
-    c.save(); c.translate(bx, 0);
-    var g = c.createLinearGradient(0,0,0,H);
-    if (b.gold) {{ g.addColorStop(0,'rgba(255,215,0,0.05)'); g.addColorStop(0.45,'rgba(255,215,0,0.02)'); }}
-    else {{ g.addColorStop(0,'rgba(155,48,255,0.055)'); g.addColorStop(0.45,'rgba(155,48,255,0.02)'); }}
-    g.addColorStop(1,'rgba(0,0,0,0)');
-    c.fillStyle = g;
-    var bw = b.w;
-    c.beginPath(); c.moveTo(-bw*0.25,0); c.lineTo(bw*0.25,0); c.lineTo(bw*1.3,H); c.lineTo(-bw*1.3,H); c.fill();
-    c.restore();
-  }});
-}}
-
-function drawCenterGlow() {{
-  var g = c.createRadialGradient(W/2,H*0.4,0,W/2,H*0.4,W*0.55);
-  g.addColorStop(0,'rgba(155,48,255,0.045)'); g.addColorStop(0.5,'rgba(155,48,255,0.018)'); g.addColorStop(1,'rgba(0,0,0,0)');
-  c.fillStyle = g; c.fillRect(0,0,W,H);
-}}
-
-function animate(t) {{
-  c.clearRect(0,0,W,H);
-  drawCenterGlow(); drawGrid(t); drawBeams(t);
-  gems.forEach(function(d) {{ d.update(t); d.draw(c, t); }});
-  requestAnimationFrame(animate);
-}}
-requestAnimationFrame(animate);
-</script>
-
-</body>
-</html>"""
-    return HTMLResponse(content=html)
+  quad( td,ty,  mx,gy, gw,gy,  tw,ty,  grd(mx,gy,

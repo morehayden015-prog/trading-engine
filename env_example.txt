@@ -1,7 +1,7 @@
 # ── Bot config ──────────────────────────────────────────────────────────────
 MODE=paper
 PHASE=2
-ALLOWED_SYMBOLS=XAUUSD,ES,NQ,CL
+ALLOWED_SYMBOLS=XAUUSD,ES,NQ,CL,EURUSD,GBPUSD,USDJPY,AUDUSD
 MAX_CONCURRENT_POSITIONS=2
 MIN_SCORE=6.5
 
@@ -34,5 +34,4 @@ MYFXBOOK_EMAIL=
 MYFXBOOK_PASSWORD=
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DB_PATH=trades.db
-LOG_DIR=logs
+DB_

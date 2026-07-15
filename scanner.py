@@ -8,9 +8,9 @@ Fires signals directly into main.py's webhook pipeline so every
 signal is scored, AI-evaluated, and paper-executed the same way
 TradingView webhooks are.
 
-Markets scanned: XAUUSD, ES, NQ, CL
+Markets scanned: XAUUSD, ES, NQ, CL, EURUSD, GBPUSD, USDJPY, AUDUSD
 Timeframes:      5m (entry), 15m (structure), 1h (bias)
-Strategies:      15 total (6 original + 9 new)
+Strategies:      16 total (6 original + 10 new)
 
 Run standalone:  python scanner.py
 Or imported:     from scanner import start_scanner (called by main.py)
@@ -44,25 +44,33 @@ SYMBOL_MAP = {
     "ES":     "ES=F",
     "NQ":     "NQ=F",
     "CL":     "CL=F",
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "USDJPY=X",
+    "AUDUSD": "AUDUSD=X",
 }
 
+FOREX_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]
+
+# Strategies that need real volume (spot FX volume via yfinance is unreliable/zero)
+# or are equity-index-specific stay futures-only; the rest are extended to forex majors.
 STRATEGY_MARKETS = {
-    "sweep_bos_fvg":   ["XAUUSD"],
-    "rp_profits":      ["ES", "NQ", "XAUUSD"],
-    "ict_5step":       ["NQ", "ES", "XAUUSD"],
+    "sweep_bos_fvg":   ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
+    "rp_profits":      ["ES", "NQ", "XAUUSD", "EURUSD", "GBPUSD"],
+    "ict_5step":       ["NQ", "ES", "XAUUSD", "EURUSD", "GBPUSD"],
     "orb_scalp":       ["ES", "NQ", "CL"],
-    "supply_demand":   ["XAUUSD", "ES", "NQ", "CL"],
+    "supply_demand":   ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
     "mamba_scalp":     ["NQ", "ES"],
-    "turtle_soup":     ["XAUUSD", "ES", "NQ"],
-    "silver_bullet":   ["XAUUSD", "NQ", "ES"],
-    "judas_swing":     ["XAUUSD", "NQ", "ES"],
-    "engulfing":       ["XAUUSD", "ES", "NQ", "CL"],
-    "pin_bar":         ["XAUUSD", "ES", "NQ", "CL"],
-    "inside_bar":      ["XAUUSD", "ES", "NQ", "CL"],
-    "morning_star":    ["XAUUSD", "ES", "NQ"],
+    "turtle_soup":     ["XAUUSD", "ES", "NQ", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
+    "silver_bullet":   ["XAUUSD", "NQ", "ES", "EURUSD", "GBPUSD"],
+    "judas_swing":     ["XAUUSD", "NQ", "ES", "EURUSD", "GBPUSD", "AUDUSD"],
+    "engulfing":       ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
+    "pin_bar":         ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
+    "inside_bar":      ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
+    "morning_star":    ["XAUUSD", "ES", "NQ", "EURUSD", "GBPUSD"],
     "vwap_reclaim":    ["ES", "NQ", "CL"],
-    "ema_cross":       ["XAUUSD", "ES", "NQ", "CL"],
-    "rsi_divergence":  ["XAUUSD", "ES", "NQ"],
+    "ema_cross":       ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
+    "rsi_divergence":  ["XAUUSD", "ES", "NQ", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
 }
 
 # ── Data fetcher ──────────────────────────────────────────────────────────────
@@ -490,26 +498,4 @@ async def run_single_scan():
                     else:
                         print(f"[scanner] webhook returned {resp.status_code}")
             except Exception as e:
-                print(f"[scanner] webhook error: {e}")
-
-    print(f"[scanner] ── scan complete. {signals_fired} signal(s) fired ──")
-
-
-async def start_scanner():
-    from market_hours import is_market_open
-    print(f"[scanner] starting. scanning every {SCAN_INTERVAL//60} minutes.")
-    print(f"[scanner] markets: {', '.join(SYMBOL_MAP.keys())}")
-    print(f"[scanner] strategies: {len(STRATEGY_DETECTORS)} total")
-    while True:
-        try:
-            if is_market_open():
-                await run_single_scan()
-            else:
-                print("[scanner] weekend — markets closed, skipping scan")
-        except Exception as e:
-            print(f"[scanner] scan loop error: {e}")
-        await asyncio.sleep(SCAN_INTERVAL)
-
-
-if __name__ == "__main__":
-    asyncio.run(run_single_scan())
+                print(f"[scan

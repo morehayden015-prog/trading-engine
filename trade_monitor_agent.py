@@ -31,6 +31,10 @@ SYMBOL_MAP = {
     "ES":     "ES=F",
     "NQ":     "NQ=F",
     "CL":     "CL=F",
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "USDJPY=X",
+    "AUDUSD": "AUDUSD=X",
 }
 
 # TP/SL distances per symbol (price units)
@@ -39,6 +43,11 @@ TP_DISTANCES = {
     "ES":     {"TP1": 5.0,  "TP2": 10.0, "TP3": 20.0, "SL": 6.0},
     "NQ":     {"TP1": 15.0, "TP2": 30.0, "TP3": 60.0, "SL": 20.0},
     "CL":     {"TP1": 0.30, "TP2": 0.60, "TP3": 1.00, "SL": 0.25},
+    # Forex majors (price units, i.e. 0.0010 = 10 pips for 4-decimal pairs)
+    "EURUSD": {"TP1": 0.0015, "TP2": 0.0030, "TP3": 0.0050, "SL": 0.0012},
+    "GBPUSD": {"TP1": 0.0020, "TP2": 0.0040, "TP3": 0.0065, "SL": 0.0016},
+    "AUDUSD": {"TP1": 0.0012, "TP2": 0.0025, "TP3": 0.0040, "SL": 0.0010},
+    "USDJPY": {"TP1": 0.15,   "TP2": 0.30,   "TP3": 0.50,   "SL": 0.12},
 }
 
 
@@ -319,16 +328,4 @@ async def trade_monitor_agent_loop():
                     try:
                         from alerts import send_trade_closed
                         await send_trade_closed(
-                            trade_id=trade_id,
-                            symbol=symbol,
-                            result="LOSS",
-                            exit_price=price,
-                            pnl=pnl,
-                            tp_used="SL",
-                            win_rate=win_rate,
-                        )
-                    except Exception:
-                        pass
-
-        except Exception as e:
-            log.error(f"Trade monitor error: {e}")
+   
