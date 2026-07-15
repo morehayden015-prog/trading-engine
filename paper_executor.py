@@ -7,12 +7,16 @@ import os
 import uuid
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
 DB_PATH      = os.getenv("DB_PATH", "trades.db")
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "10000"))
+
+# Trading timezone for day/week/month boundaries — handles EST/EDT automatically.
+TRADING_TZ = ZoneInfo("America/New_York")
 
 # Risk config
 BASE_RISK_PCT = float(os.getenv("BASE_RISK_PCT", "1.0"))   # 1% default
@@ -170,3 +174,105 @@ class PaperExecutor:
         win_rate = round(wins / total, 3) if total > 0 else None
         return {
             "total": total, "wins": wins, "losses": losses,
+            "win_rate": win_rate, "total_pnl": total_pl,
+        }
+
+    def get_today_stats(self) -> dict:
+        """Wins/losses/BE + P&L for trades closed today (UTC)."""
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        rows = self.conn.execute(
+            "SELECT result, pnl FROM paper_trades WHERE status='CLOSED' AND exit_time LIKE ?",
+            (f"{today}%",),
+        ).fetchall()
+        total    = len(rows)
+        wins     = sum(1 for r in rows if r["result"] == "WIN")
+        losses   = sum(1 for r in rows if r["result"] == "LOSS")
+        be       = sum(1 for r in rows if r["result"] == "BE")
+        total_pl = round(sum(r["pnl"] or 0 for r in rows), 2)
+        win_rate = round(wins / total, 3) if total > 0 else None
+        return {
+            "total": total, "wins": wins, "losses": losses, "be": be,
+            "win_rate": win_rate, "total_pnl": total_pl,
+        }
+
+    @staticmethod
+    def _parse_exit_time(ts: str) -> datetime:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def get_performance_summary(self) -> dict:
+        """
+        TODAY / THIS WEEK (Mon-Sun) / THIS MONTH performance, computed from
+        closed trades, with day boundaries in America/New_York (EST/EDT) —
+        the account's trading timezone.
+        """
+        rows = self.conn.execute(
+            "SELECT result, pnl, exit_time FROM paper_trades WHERE status='CLOSED' AND exit_time IS NOT NULL"
+        ).fetchall()
+
+        now_local   = datetime.now(timezone.utc).astimezone(TRADING_TZ)
+        today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start  = today_start - timedelta(days=today_start.weekday())  # Monday
+        month_start = today_start.replace(day=1)
+
+        def bucket(since: datetime) -> dict:
+            matched = [r for r in rows if self._parse_exit_time(r["exit_time"]).astimezone(TRADING_TZ) >= since]
+            wins    = sum(1 for r in matched if r["result"] == "WIN")
+            losses  = sum(1 for r in matched if r["result"] == "LOSS")
+            total   = len(matched)
+            net_pnl = round(sum(r["pnl"] or 0 for r in matched), 2)
+            return {
+                "wins": wins, "losses": losses, "total": total,
+                "net_pnl": net_pnl,
+                "win_rate": round(wins / total, 3) if total > 0 else None,
+                "label": "GREEN" if net_pnl >= 0 else "RED",
+            }
+
+        today = bucket(today_start)
+        week  = bucket(week_start)
+        month = bucket(month_start)
+
+        return {
+            "today": {
+                "wins": today["wins"], "losses": today["losses"],
+                "net_pnl": today["net_pnl"], "win_rate": today["win_rate"],
+            },
+            "this_week": {
+                "net_pnl": week["net_pnl"], "label": week["label"],
+                "wins": week["wins"], "losses": week["losses"],
+            },
+            "this_month": {
+                "net_pnl": month["net_pnl"], "label": month["label"],
+                "wins": month["wins"], "losses": month["losses"],
+            },
+            "timezone":    "America/New_York",
+            "generated_at": now_local.isoformat(),
+        }
+
+    def get_margin_status(self) -> dict:
+        """
+        Margin committed to currently OPEN positions, analogous to a
+        broker's 'margin used' readout on a paper trading account.
+        Uses each open trade's risk_dollars (capital allocated) as its
+        margin footprint since this is a fixed-R paper model rather than
+        a live-priced margin account.
+        """
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(risk_dollars), 0) as used, COUNT(*) as n "
+            "FROM paper_trades WHERE status='OPEN'"
+        ).fetchone()
+        used      = round(row["used"] or 0.0, 2)
+        available = round(max(ACCOUNT_SIZE - used, 0.0), 2)
+        used_pct  = round((used / ACCOUNT_SIZE) * 100, 2) if ACCOUNT_SIZE else 0.0
+        return {
+            "account_size":   ACCOUNT_SIZE,
+            "margin_used":    used,
+            "margin_available": available,
+            "margin_used_pct": used_pct,
+            "open_positions": row["n"] or 0,
+        }
+
+    def close(self):
+        self.conn.close()

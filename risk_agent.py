@@ -198,4 +198,12 @@ async def risk_agent_loop():
                         f"**Daily P&L:** ${daily_pnl:+.2f}\n"
                         f"**Weekly P&L:** ${weekly_pnl:+.2f}\n"
                         f"**Position Sizing:** {sizing}x base risk\n\n"
-                        f"Bot is in risk-redu
+                        f"Bot is in risk-reduction mode.",
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            log.error(f"Risk agent error: {e}")
+
+        await asyncio.sleep(60)

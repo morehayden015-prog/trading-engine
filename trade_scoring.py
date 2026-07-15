@@ -125,4 +125,24 @@ def score_session(session: str, symbol: str) -> int:
 
 def score_dxy(direction: str, symbol: str) -> float:
     """
-  
+    Simple DXY alignment heuristic.
+    Gold and Oil are inversely correlated to DXY.
+    Equities are mildly inversely correlated.
+    """
+    inverse = {"XAUUSD", "CL"}
+    if symbol in inverse:
+        return 1.1 if direction == "SHORT" else 0.9
+    return 1.0
+
+
+def _get_session(utc_hour: int) -> str:
+    if 22 <= utc_hour or utc_hour < 7:
+        return "ASIAN"
+    elif 7 <= utc_hour < 12:
+        return "LONDON"
+    elif 12 <= utc_hour < 17:
+        return "NY_OPEN"
+    elif 17 <= utc_hour < 20:
+        return "NY_AFTERNOON"
+    else:
+        return "NY_CLOSE"

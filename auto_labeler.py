@@ -161,11 +161,13 @@ async def auto_label_loop(executor, labeler):
                     from alerts import send_trade_closed
                     conn = sqlite3.connect(DB_PATH)
                     row  = conn.execute(
-                        "SELECT pnl, strategy FROM paper_trades WHERE trade_id=?", (trade_id,)
+                        "SELECT pnl, strategy, risk_pct, risk_dollars FROM paper_trades WHERE trade_id=?", (trade_id,)
                     ).fetchone()
                     conn.close()
                     pnl      = row[0] if row and row[0] is not None else 0.0
                     strategy = row[1] if row else trade.get("strategy", "?")
+                    risk_pct = row[2] if row else None
+                    risk_usd = row[3] if row else None
 
                     win_rate = _get_strategy_win_rate(strategy, symbol)
                     tp_used  = _choose_tp(win_rate)
@@ -178,6 +180,8 @@ async def auto_label_loop(executor, labeler):
                         pnl=pnl,
                         tp_used=tp_used,
                         win_rate=win_rate,
+                        risk_pct=risk_pct,
+                        risk_usd=risk_usd,
                     )
                 except Exception as e:
                     log.error(f"Discord alert failed for {trade_id}: {e}")

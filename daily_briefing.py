@@ -81,6 +81,29 @@ def _get_circuit_breaker_summary() -> str:
         return "Circuit breaker data unavailable"
 
 
+def _get_performance_summary_text() -> str:
+    """TODAY / THIS WEEK / THIS MONTH performance, same numbers as GET /stats."""
+    try:
+        from paper_executor import PaperExecutor
+        pe  = PaperExecutor()
+        perf = pe.get_performance_summary()
+        pe.close()
+
+        today = perf["today"]
+        week  = perf["this_week"]
+        month = perf["this_month"]
+        wr_str = f"{today['win_rate']:.0%}" if today.get("win_rate") is not None else "N/A"
+
+        return (
+            f"**Today:** {today['wins']}W / {today['losses']}L  •  WR {wr_str}  •  ${today['net_pnl']:+.2f}\n"
+            f"**This Week:** {week['label']}  •  {week['wins']}W / {week['losses']}L  •  ${week['net_pnl']:+.2f}\n"
+            f"**This Month:** {month['label']}  •  {month['wins']}W / {month['losses']}L  •  ${month['net_pnl']:+.2f}"
+        )
+    except Exception as e:
+        log.error(f"Performance summary unavailable: {e}")
+        return "Performance summary unavailable"
+
+
 def _get_bot_updates() -> str:
     try:
         cal_log = LOG_DIR / "calibration_history.jsonl"
@@ -177,12 +200,14 @@ async def send_daily_briefing():
     """Generate and post the briefing to Discord #market-news."""
     log.info("Generating daily briefing...")
     briefing = generate_briefing()
+    perf_text = _get_performance_summary_text()
 
     try:
         from alerts import send_news_alert
+        body = f"{briefing['text'][:1800]}\n\n### 📈 Performance (EST)\n{perf_text}"
         await send_news_alert(
             title=f"🌅 Daily Trading Briefing — {briefing['date']}",
-            body=briefing["text"][:2000],
+            body=body[:4000],
             color=0xF39C12,
         )
         log.info("Daily briefing sent to Discord")

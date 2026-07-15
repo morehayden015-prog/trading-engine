@@ -127,4 +127,7 @@ async def check_breaking_news(symbol: str) -> dict:
         text = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
         if text.startswith("{"):
             return json.loads(text)
-    except Exceptio
+    except Exception as e:
+        log.error(f"Breaking news check failed: {e}")
+
+    return {"blackout": False, "reason": "check failed"}

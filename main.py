@@ -5,6 +5,7 @@ MODE=paper | PHASE=2
 """
 import os
 import json
+import time
 import asyncio
 import logging
 import hmac
@@ -13,7 +14,7 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, FileResponse
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
@@ -35,6 +36,13 @@ from regime_agent import regime_agent_loop
 from risk_agent import risk_agent_loop, check_correlation_risk
 from trade_monitor_agent import trade_monitor_agent_loop
 from agent_context import context
+from dedupe_lib import (
+    backup_db as dupe_backup_db,
+    find_duplicate_groups,
+    delete_duplicates,
+    refresh_strategy_stats,
+    build_preview,
+)
 
 load_dotenv()
 
@@ -56,6 +64,40 @@ PHASE           = int(os.getenv("PHASE", "2"))
 ALLOWED_SYMBOLS = set(os.getenv("ALLOWED_SYMBOLS", "XAUUSD,ES,NQ,CL,EURUSD,GBPUSD,USDJPY,AUDUSD").split(","))
 MAX_CONCURRENT  = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
 WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET", "hayden_private_key")
+ADMIN_SECRET    = os.getenv("ADMIN_SECRET", "")
+
+# ── Webhook dedupe (TradingView sometimes double-fires the same alert) ──
+DEDUPE_WINDOW_SECONDS = 10
+_recent_signals: dict = {}   # fingerprint -> unix timestamp of last accepted signal
+
+
+def _signal_fingerprint(symbol: str, strategy: str, direction: str, price: float) -> str:
+    return f"{symbol}|{strategy}|{direction}|{price}"
+
+
+def _is_duplicate_signal(fingerprint: str) -> bool:
+    """
+    Returns True (and does NOT register the signal) if a signal with this
+    fingerprint was already accepted within DEDUPE_WINDOW_SECONDS. Otherwise
+    registers the fingerprint and returns False. Cleans out stale entries
+    on every call so the dict never grows unbounded.
+    """
+    now = time.time()
+    stale = [fp for fp, ts in _recent_signals.items() if now - ts > DEDUPE_WINDOW_SECONDS]
+    for fp in stale:
+        del _recent_signals[fp]
+
+    if fingerprint in _recent_signals:
+        return True
+
+    _recent_signals[fingerprint] = now
+    return False
+
+
+def _check_admin_auth(request: Request):
+    token = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_SECRET or token != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 # ── Dashboard passcode auth ──
 DASHBOARD_PASSCODE   = "8462"
@@ -179,6 +221,21 @@ async def webhook(request: Request):
     if symbol not in ALLOWED_SYMBOLS:
         return JSONResponse({"status": "ignored", "reason": f"{symbol} not allowed"})
 
+    direction = signal.get("direction", signal.get("action", "buy"))
+    strategy  = signal.get("strategy", "unknown")
+    timeframe = signal.get("timeframe", "5m")
+    price     = float(signal.get("price", 0))
+
+    # Dedupe — TradingView sometimes fires the same alert twice within seconds,
+    # which used to create duplicate trades with different Trade IDs.
+    fingerprint = _signal_fingerprint(symbol, strategy, direction, price)
+    if _is_duplicate_signal(fingerprint):
+        log.warning(
+            f"DUPLICATE SIGNAL REJECTED: {symbol} {direction} {strategy} @ {price} "
+            f"(matched a signal received within the last {DEDUPE_WINDOW_SECONDS}s)"
+        )
+        return JSONResponse({"status": "duplicate_ignored"})
+
     # Weekend guard — no AI calls on weekends
     if not is_market_open():
         return JSONResponse({"status": "ignored", "reason": "weekend — markets closed"})
@@ -200,11 +257,6 @@ async def webhook(request: Request):
     if cb["status"] == "red":
         log.warning(f"Trade blocked by circuit breaker: {cb['reason']}")
         return JSONResponse({"status": "ignored", "reason": f"circuit breaker: {cb['reason']}"})
-
-    direction = signal.get("direction", signal.get("action", "buy"))
-    strategy  = signal.get("strategy", "unknown")
-    timeframe = signal.get("timeframe", "5m")
-    price     = float(signal.get("price", 0))
 
     # Correlation risk check
     open_positions = executor.get_open_trades()
@@ -317,9 +369,14 @@ async def trades():
 
 @app.get("/stats")
 async def stats():
+    """
+    Session-level stats plus TODAY / THIS WEEK / THIS MONTH performance
+    (day boundaries computed in America/New_York — the account's trading timezone).
+    """
     try:
         session_stats = executor.get_session_stats()
-        return JSONResponse(session_stats)
+        performance   = executor.get_performance_summary()
+        return JSONResponse({**session_stats, **performance})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -328,6 +385,82 @@ async def stats():
 async def agent_context_endpoint():
     """Return the full shared agent context snapshot."""
     return JSONResponse(context.snapshot())
+
+
+# ── Admin: live-DB duplicate trade cleanup ──
+# Protected by ADMIN_SECRET env var, sent as the X-Admin-Token header.
+# Runs the same backup + preview + confirm flow as cleanup_dupes.py, but
+# in-process so it operates on the actual Railway persistent volume DB.
+
+@app.post("/admin/cleanup-dupes/preview")
+async def admin_cleanup_preview(request: Request):
+    """Step 1: backs up trades.db and returns a preview of duplicates. Deletes nothing."""
+    _check_admin_auth(request)
+    backup_path = dupe_backup_db()
+    groups  = find_duplicate_groups()
+    preview = build_preview(groups)
+    total_pnl_at_risk = round(sum((p["pnl"] or 0) for p in preview), 2)
+    log.info(f"Admin cleanup preview: {len(preview)} duplicate trade(s) found | backup={backup_path}")
+    return JSONResponse({
+        "status":             "preview",
+        "backup_path":        backup_path,
+        "duplicate_count":    len(preview),
+        "trades_to_delete":   preview,
+        "total_pnl_at_risk":  total_pnl_at_risk,
+        "next_step":          'POST /admin/cleanup-dupes/confirm with body {"confirm": "DELETE"} to proceed',
+    })
+
+
+@app.post("/admin/cleanup-dupes/confirm")
+async def admin_cleanup_confirm(request: Request):
+    """Step 2: actually deletes the duplicates found by /preview. Requires {"confirm": "DELETE"}."""
+    _check_admin_auth(request)
+    body = await request.body()
+    try:
+        data = json.loads(body) if body else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    if data.get("confirm") != "DELETE":
+        raise HTTPException(status_code=400, detail='Must include {"confirm": "DELETE"} in the request body')
+
+    groups  = find_duplicate_groups()
+    preview = build_preview(groups)
+    if not preview:
+        return JSONResponse({"status": "no_duplicates_found"})
+
+    trade_ids = [p["trade_id"] for p in preview]
+    total_pnl_removed = delete_duplicates(trade_ids)
+    log.warning(
+        f"ADMIN CLEANUP: deleted {len(trade_ids)} duplicate trade(s) | "
+        f"P&L removed={total_pnl_removed:+.2f}"
+    )
+
+    try:
+        strategy_summary = refresh_strategy_stats()
+    except Exception as e:
+        strategy_summary = {"error": str(e)}
+
+    return JSONResponse({
+        "status":             "deleted",
+        "deleted_count":      len(trade_ids),
+        "total_pnl_removed":  total_pnl_removed,
+        "strategy_refresh":   strategy_summary,
+    })
+
+
+@app.get("/admin/download-backup")
+async def admin_download_backup(request: Request, path: str):
+    """Retrieve a trades_backup_*.db file created by the cleanup endpoints above."""
+    _check_admin_auth(request)
+    backup_dir = os.path.dirname(os.getenv("DB_PATH", "trades.db")) or "."
+    filename = os.path.basename(path)
+    if not filename.startswith("trades_backup_") or not filename.endswith(".db"):
+        raise HTTPException(status_code=400, detail="Invalid backup filename")
+    full_path = os.path.join(backup_dir, filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Backup not found")
+    return FileResponse(full_path, filename=filename, media_type="application/octet-stream")
 
 
 @app.get("/login")
@@ -1017,4 +1150,126 @@ Diamond.prototype.draw = function(cx, t) {{
   quad(-tw,ty, -gw,gy, -mx,gy, -td,ty, grd(-gw,gy,-td,ty,dm,dk));   // far-left  (dark)
   quad(-td,ty, -mx,gy,  0,gy,   0,ty,  grd(-mx,gy,0,ty,lm,lt));     // near-left (light)
   quad(  0,ty,   0,gy, mx,gy,  td,ty,  grd(0,gy,td,ty,dm,dk));      // near-right(dark)
-  quad( td,ty,  mx,gy, gw,gy,  tw,ty,  grd(mx,gy,
+  quad( td,ty,  mx,gy, gw,gy,  tw,ty,  grd(mx,gy,tw,ty,lm,lt));     // far-right (light)
+
+  // ── TABLE: reflective flat top ──
+  var tg = cx.createLinearGradient(-tw,ty,tw,ty);
+  tg.addColorStop(0,lt); tg.addColorStop(0.28,dk); tg.addColorStop(0.55,lt); tg.addColorStop(1,dm);
+  quad(-tw,ty, -td,ty, td,ty, tw,ty, tg);  // degenerate line — table is just the top edge,
+  // draw it as a thin strip:
+  cx.beginPath(); cx.moveTo(-tw,ty); cx.lineTo(tw,ty);
+  cx.strokeStyle=glC; cx.lineWidth=2.0; cx.stroke();
+
+  // ── PAVILION: 4 filled triangular facets ──
+  tri(-gw,gy, -mx,gy,  0,cu, grd(-gw,gy,0,cu,lm,dk));   // far-left  (light→dark)
+  tri(-mx,gy,   0,gy,  0,cu, grd(-mx,gy,0,cu,lt,lm));    // near-left (bright)
+  tri(  0,gy,  mx,gy,  0,cu, grd(0,gy,mx,gy,dk,lm));     // near-right(dark→mid)
+  tri( mx,gy,  gw,gy,  0,cu, grd(mx,gy,0,cu,dm,lt));     // far-right (mid→light)
+
+  // ── GLOW SILHOUETTE ──
+  cx.shadowColor=glowC; cx.shadowBlur=18;
+  cx.strokeStyle=edC; cx.lineWidth=1.1;
+  cx.beginPath();
+  cx.moveTo(-tw,ty); cx.lineTo(tw,ty);
+  cx.lineTo(gw,gy); cx.lineTo(0,cu); cx.lineTo(-gw,gy); cx.closePath();
+  cx.stroke();
+  cx.shadowBlur=0;
+
+  // ── INTERIOR FACET LINES ──
+  cx.globalAlpha = this.op * 0.48;
+  cx.strokeStyle = edC; cx.lineWidth = 0.55;
+  [[-td,ty,-mx,gy],[0,ty,0,gy],[td,ty,mx,gy],[-mx,gy,0,cu],[mx,gy,0,cu]].forEach(function(l) {{
+    cx.beginPath(); cx.moveTo(l[0],l[1]); cx.lineTo(l[2],l[3]); cx.stroke();
+  }});
+
+  // Girdle bright line
+  cx.globalAlpha = this.op;
+  cx.strokeStyle = edC; cx.lineWidth = 1.1;
+  cx.beginPath(); cx.moveTo(-gw,gy); cx.lineTo(gw,gy); cx.stroke();
+
+  // ── EDGE HIGHLIGHTS (simulate key light) ──
+  cx.strokeStyle = glC;
+  cx.lineWidth = 1.6;
+  cx.beginPath(); cx.moveTo(tw,ty); cx.lineTo(gw,gy); cx.stroke();  // right crown edge
+  cx.lineWidth = 1.1;
+  cx.beginPath(); cx.moveTo(-gw,gy); cx.lineTo(0,cu); cx.stroke(); // left pavilion edge
+
+  // Culet glint
+  cx.lineWidth = 1.5;
+  var cg = s*0.04;
+  cx.beginPath(); cx.moveTo(-cg,cu); cx.lineTo(cg,cu); cx.stroke();
+
+  // ── 4-POINTED SPARKLE FLASH ──
+  var flash = (Math.sin(t*0.003 + this.sparkPhase) + 1) * 0.5;
+  if (flash > 0.64) {{
+    cx.globalAlpha = this.op * ((flash-0.64)/0.36);
+    cx.strokeStyle = glC;
+    var ss = s*0.16, spx = tw*0.22, spy = ty + s*0.05;
+    cx.lineWidth = 1.1;
+    cx.beginPath(); cx.moveTo(spx-ss,spy); cx.lineTo(spx+ss,spy); cx.stroke();
+    cx.beginPath(); cx.moveTo(spx,spy-ss*0.75); cx.lineTo(spx,spy+ss*0.75); cx.stroke();
+    cx.lineWidth = 0.55;
+    cx.beginPath(); cx.moveTo(spx-ss*0.6,spy-ss*0.6); cx.lineTo(spx+ss*0.6,spy+ss*0.6); cx.stroke();
+    cx.beginPath(); cx.moveTo(spx+ss*0.6,spy-ss*0.6); cx.lineTo(spx-ss*0.6,spy+ss*0.6); cx.stroke();
+  }}
+
+  cx.restore();
+}};
+
+var gems = [];
+for (var i = 0; i < 22; i++) {{ gems.push(new Diamond(true)); }}
+
+function drawGrid(t) {{
+  var cols = 24, rows = 16, cw = W/cols, ch = H/rows;
+  c.strokeStyle = 'rgba(61,16,96,0.3)'; c.lineWidth = 0.5;
+  for (var r = 0; r <= rows; r++) {{ c.beginPath(); c.moveTo(0,r*ch); c.lineTo(W,r*ch); c.stroke(); }}
+  for (var col = 0; col <= cols; col++) {{ c.beginPath(); c.moveTo(col*cw,0); c.lineTo(col*cw,H); c.stroke(); }}
+  for (var nr = 2; nr < rows; nr += 4) {{
+    for (var nc = 2; nc < cols; nc += 5) {{
+      var g = (Math.sin(t*0.0008 + nr*1.3 + nc*0.7) + 1) / 2;
+      var useG = (nr + nc) % 3 === 0;
+      c.fillStyle = useG ? 'rgba(255,215,0,' + (g*0.32) + ')' : 'rgba(155,48,255,' + (g*0.38) + ')';
+      c.beginPath(); c.arc(nc*cw, nr*ch, 1.4 + g*0.6, 0, Math.PI*2); c.fill();
+    }}
+  }}
+}}
+
+var beams = [
+  {{ sx:0.22, sp:0.00015, w:110, gold:false }},
+  {{ sx:0.62, sp:0.00009, w:150, gold:true  }},
+  {{ sx:0.88, sp:0.00022, w:80,  gold:false }},
+];
+function drawBeams(t) {{
+  beams.forEach(function(b, i) {{
+    var ox = Math.sin(t*b.sp + i*2.1) * W * 0.11;
+    var bx = W*b.sx + ox;
+    c.save(); c.translate(bx, 0);
+    var g = c.createLinearGradient(0,0,0,H);
+    if (b.gold) {{ g.addColorStop(0,'rgba(255,215,0,0.05)'); g.addColorStop(0.45,'rgba(255,215,0,0.02)'); }}
+    else {{ g.addColorStop(0,'rgba(155,48,255,0.055)'); g.addColorStop(0.45,'rgba(155,48,255,0.02)'); }}
+    g.addColorStop(1,'rgba(0,0,0,0)');
+    c.fillStyle = g;
+    var bw = b.w;
+    c.beginPath(); c.moveTo(-bw*0.25,0); c.lineTo(bw*0.25,0); c.lineTo(bw*1.3,H); c.lineTo(-bw*1.3,H); c.fill();
+    c.restore();
+  }});
+}}
+
+function drawCenterGlow() {{
+  var g = c.createRadialGradient(W/2,H*0.4,0,W/2,H*0.4,W*0.55);
+  g.addColorStop(0,'rgba(155,48,255,0.045)'); g.addColorStop(0.5,'rgba(155,48,255,0.018)'); g.addColorStop(1,'rgba(0,0,0,0)');
+  c.fillStyle = g; c.fillRect(0,0,W,H);
+}}
+
+function animate(t) {{
+  c.clearRect(0,0,W,H);
+  drawCenterGlow(); drawGrid(t); drawBeams(t);
+  gems.forEach(function(d) {{ d.update(t); d.draw(c, t); }});
+  requestAnimationFrame(animate);
+}}
+requestAnimationFrame(animate);
+</script>
+
+</body>
+</html>"""
+    return HTMLResponse(content=html)

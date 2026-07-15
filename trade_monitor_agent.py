@@ -140,18 +140,19 @@ def _update_trade_meta(trade_id: str, **kwargs):
 
 
 def _close_trade_in_db(trade_id: str, result: str, exit_price: float, partial: bool = False):
-    """Close trade in DB, calculate P&L."""
+    """Close trade in DB, calculate P&L. Returns (pnl, risk_pct, risk_dollars)."""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         row  = conn.execute(
-            "SELECT risk_dollars, rr FROM paper_trades WHERE trade_id=?", (trade_id,)
+            "SELECT risk_pct, risk_dollars, rr FROM paper_trades WHERE trade_id=?", (trade_id,)
         ).fetchone()
 
         if not row:
             conn.close()
-            return 0.0
+            return 0.0, None, None
 
+        risk_pct = row["risk_pct"]
         risk_usd = row["risk_dollars"]
         rr       = row["rr"]
 
@@ -169,10 +170,10 @@ def _close_trade_in_db(trade_id: str, result: str, exit_price: float, partial: b
         )
         conn.commit()
         conn.close()
-        return pnl
+        return pnl, risk_pct, risk_usd
     except Exception as e:
         log.error(f"Close trade DB error: {e}")
-        return 0.0
+        return 0.0, None, None
 
 
 async def trade_monitor_agent_loop():
@@ -284,7 +285,7 @@ async def trade_monitor_agent_loop():
 
                 # 2. Partial close at TP1 if targeting TP2 or TP3
                 if at_tp1 and not tp1_hit and tp_target in ("TP2", "TP3"):
-                    pnl = _close_trade_in_db(trade_id, "WIN", price, partial=True)
+                    pnl, risk_pct, risk_usd = _close_trade_in_db(trade_id, "WIN", price, partial=True)
                     _update_trade_meta(trade_id, tp1_hit=1, be_moved=1)
                     log.info(f"{trade_id} | Partial close @ TP1 {price} | P&L={pnl:+.2f}")
                     try:
@@ -297,6 +298,8 @@ async def trade_monitor_agent_loop():
                             pnl=pnl,
                             tp_used="TP1 (Partial)",
                             win_rate=win_rate,
+                            risk_pct=risk_pct,
+                            risk_usd=risk_usd,
                         )
                     except Exception:
                         pass
@@ -304,7 +307,7 @@ async def trade_monitor_agent_loop():
 
                 # 3. Full close at final target
                 if at_final:
-                    pnl = _close_trade_in_db(trade_id, "WIN", price)
+                    pnl, risk_pct, risk_usd = _close_trade_in_db(trade_id, "WIN", price)
                     log.info(f"{trade_id} | WIN @ {tp_target} {price} | P&L={pnl:+.2f}")
                     try:
                         from alerts import send_trade_closed
@@ -316,6 +319,8 @@ async def trade_monitor_agent_loop():
                             pnl=pnl,
                             tp_used=tp_target,
                             win_rate=win_rate,
+                            risk_pct=risk_pct,
+                            risk_usd=risk_usd,
                         )
                     except Exception:
                         pass
@@ -323,9 +328,23 @@ async def trade_monitor_agent_loop():
 
                 # 4. Stop loss hit
                 if at_sl:
-                    pnl = _close_trade_in_db(trade_id, "LOSS", price)
+                    pnl, risk_pct, risk_usd = _close_trade_in_db(trade_id, "LOSS", price)
                     log.info(f"{trade_id} | LOSS @ SL {price} | P&L={pnl:+.2f}")
                     try:
                         from alerts import send_trade_closed
                         await send_trade_closed(
-   
+                            trade_id=trade_id,
+                            symbol=symbol,
+                            result="LOSS",
+                            exit_price=price,
+                            pnl=pnl,
+                            tp_used="SL",
+                            win_rate=win_rate,
+                            risk_pct=risk_pct,
+                            risk_usd=risk_usd,
+                        )
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            log.error(f"Trade monitor error: {e}")

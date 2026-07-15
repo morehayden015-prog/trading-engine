@@ -498,4 +498,26 @@ async def run_single_scan():
                     else:
                         print(f"[scanner] webhook returned {resp.status_code}")
             except Exception as e:
-                print(f"[scan
+                print(f"[scanner] webhook error: {e}")
+
+    print(f"[scanner] ── scan complete. {signals_fired} signal(s) fired ──")
+
+
+async def start_scanner():
+    from market_hours import is_market_open
+    print(f"[scanner] starting. scanning every {SCAN_INTERVAL//60} minutes.")
+    print(f"[scanner] markets: {', '.join(SYMBOL_MAP.keys())}")
+    print(f"[scanner] strategies: {len(STRATEGY_DETECTORS)} total")
+    while True:
+        try:
+            if is_market_open():
+                await run_single_scan()
+            else:
+                print("[scanner] weekend — markets closed, skipping scan")
+        except Exception as e:
+            print(f"[scanner] scan loop error: {e}")
+        await asyncio.sleep(SCAN_INTERVAL)
+
+
+if __name__ == "__main__":
+    asyncio.run(run_single_scan())

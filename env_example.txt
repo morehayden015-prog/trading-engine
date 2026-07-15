@@ -34,4 +34,8 @@ MYFXBOOK_EMAIL=
 MYFXBOOK_PASSWORD=
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DB_
+DB_PATH=trades.db
+LOG_DIR=logs
+
+# ── Admin (protects /admin/cleanup-dupes* routes) ─────────────────────────────
+ADMIN_SECRET=set_a_long_random_secret_here

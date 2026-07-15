@@ -72,6 +72,11 @@ async def send_trade_alert(trade: dict, score: dict, ai_result: dict):
                 "inline": True,
             },
             {
+                "name": "📐 Position Size",
+                "value": f"**${risk_usd}**",
+                "inline": True,
+            },
+            {
                 "name": "🎯 R:R",
                 "value": f"**1:{rr}**",
                 "inline": True,
@@ -109,6 +114,8 @@ async def send_trade_closed(
     pnl: float,
     tp_used: str = "TP1",
     win_rate: float = None,
+    risk_pct: float = None,
+    risk_usd: float = None,
 ):
     """Send trade close notification to #trade-alerts."""
     if not TRADE_WEBHOOK:
@@ -118,6 +125,8 @@ async def send_trade_closed(
     color   = 0x00C851 if result == "WIN" else 0xFF4444 if result == "LOSS" else 0xFFAA00
     pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
     wr_str  = f"{win_rate:.0%}" if win_rate is not None else "N/A"
+    risk_str = f"{risk_pct}%  (${risk_usd})" if risk_pct is not None and risk_usd is not None else "N/A"
+    size_str = f"${risk_usd}" if risk_usd is not None else "N/A"
 
     tp_labels = {"TP1": "TP1 — Quick Profit", "TP2": "TP2 — Standard", "TP3": "TP3 — Full Run"}
     tp_label  = tp_labels.get(tp_used, tp_used)
@@ -126,10 +135,12 @@ async def send_trade_closed(
         "title": f"{emoji}  Trade Closed  •  {symbol}  •  {result}",
         "color": color,
         "fields": [
-            {"name": "Exit Price", "value": str(exit_price),      "inline": True},
-            {"name": "P&L",        "value": f"**{pnl_str}**",     "inline": True},
-            {"name": "Target Hit", "value": f"**{tp_label}**",    "inline": True},
-            {"name": "Strategy WR","value": wr_str,               "inline": True},
+            {"name": "Exit Price",      "value": str(exit_price),   "inline": True},
+            {"name": "P&L",             "value": f"**{pnl_str}**",  "inline": True},
+            {"name": "Target Hit",      "value": f"**{tp_label}**", "inline": True},
+            {"name": "Strategy WR",     "value": wr_str,            "inline": True},
+            {"name": "💰 Risk",         "value": risk_str,          "inline": True},
+            {"name": "📐 Position Size","value": size_str,          "inline": True},
         ],
         "footer": {
             "text": f"Trade ID: {trade_id}  •  Hayden Bot  •  {datetime.utcnow().strftime('%H:%M UTC')}",
