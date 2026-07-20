@@ -1183,7 +1183,7 @@ footer::before {{
     <div class="agent-icon">∿</div>
     <div class="agent-name">CALIBRATE</div>
     <div class="agent-status">SELF-LEARNING<br>WEIGHT ADJ</div>
-    <div class="agent-freq">↻ 25 TRADES</div>
+    <div class="agent-freq">↻ 10 TRADES</div>
   </div>
   <div class="agent-node">
     <div class="agent-ping"></div>

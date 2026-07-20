@@ -8,7 +8,7 @@ Main entry point. Runs the full self-learning cycle:
 
 Called by auto_calibrate.py on:
 - Every Sunday (weekly cycle)
-- Every 25 completed trades (trade-count trigger)
+- Every 10 completed trades (trade-count trigger)
 
 Can also be run manually: python self_learning.py
 """

@@ -2,7 +2,7 @@
 auto_calibrate.py — Automatic calibration scheduler
 Runs calibration:
   - Every Sunday at 00:00 UTC
-  - Every 25 new labelled trades
+  - Every 10 new labelled trades
 Sends calibration report to #bot-updates Discord channel.
 """
 
@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 DB_PATH = os.getenv("DB_PATH", "trades.db")
 
 _last_trade_count: int = 0
-TRADES_TRIGGER = int(os.getenv("CAL_TRADES_TRIGGER", "25"))
+TRADES_TRIGGER = int(os.getenv("CAL_TRADES_TRIGGER", "10"))
 
 
 def _get_labelled_count() -> int:
@@ -87,7 +87,7 @@ async def calibration_loop():
     """
     Long-running loop. Checks two triggers:
     1. Sunday 00:00 UTC weekly run
-    2. Every 25 new labelled trades
+    2. Every 10 new labelled trades
     """
     global _last_trade_count
     _last_trade_count = _get_labelled_count()
