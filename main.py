@@ -478,105 +478,112 @@ async def admin_download_backup(request: Request, path: str):
 _STRATEGY_BREAKDOWN_TZ = ZoneInfo("America/New_York")
 
 
-@app.get("/admin/strategy-breakdown/{secret}")
-async def admin_strategy_breakdown(secret: str, days: int = 1):
+def _compute_strategy_breakdown(days: int = 1) -> dict:
     """
     Read-only per-strategy + per-symbol performance breakdown over the
     trailing `days` days (default 1 = today only, in America/New_York —
     the same trading-day boundary /stats uses). Only CLOSED trades are
     counted; open positions are excluded.
+
+    Shared by GET /admin/strategy-breakdown/{secret} (raw JSON, secret-gated)
+    and the /dashboard page (rendered server-side for an already-authenticated
+    session, so it never needs the admin secret client-side).
     """
+    db_path = os.getenv("DB_PATH", "trades.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    # Detect whether an R-multiple column exists on this DB before
+    # selecting it — schemas can drift between environments and this
+    # endpoint must not hard-fail if the column is absent.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)").fetchall()}
+    r_col = "rr" if "rr" in cols else None
+
+    select_cols = "strategy, symbol, result, pnl, exit_time"
+    if r_col:
+        select_cols += f", {r_col}"
+
+    rows = conn.execute(
+        f"SELECT {select_cols} FROM paper_trades "
+        f"WHERE status='CLOSED' AND exit_time IS NOT NULL"
+    ).fetchall()
+    conn.close()
+
+    now_local   = datetime.now(timezone.utc).astimezone(_STRATEGY_BREAKDOWN_TZ)
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    since       = today_start - timedelta(days=max(days, 1) - 1)
+
+    def _parse_exit_time(ts: str) -> datetime:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_STRATEGY_BREAKDOWN_TZ)
+
+    matched = [r for r in rows if _parse_exit_time(r["exit_time"]) >= since]
+
+    groups = {}
+    for r in matched:
+        key = (r["strategy"] or "UNKNOWN", r["symbol"] or "UNKNOWN")
+        g = groups.setdefault(key, {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "r_values": []})
+        g["trades"] += 1
+        if r["result"] == "WIN":
+            g["wins"] += 1
+        elif r["result"] == "LOSS":
+            g["losses"] += 1
+        g["net_pnl"] += r["pnl"] or 0
+        if r_col:
+            r_val = r[r_col]
+            if r_val is not None:
+                g["r_values"].append(r_val)
+
+    def _build_entry(g: dict, strategy: str = None, symbol: str = None) -> dict:
+        trades = g["trades"]
+        entry = {}
+        if strategy is not None:
+            entry["strategy"] = strategy
+        if symbol is not None:
+            entry["symbol"] = symbol
+        entry.update({
+            "trades":    trades,
+            "wins":      g["wins"],
+            "losses":    g["losses"],
+            "win_rate":  round((g["wins"] / trades) * 100, 1) if trades else 0.0,
+            "net_pnl":   round(g["net_pnl"], 2),
+        })
+        if r_col:
+            entry["avg_r"] = round(sum(g["r_values"]) / len(g["r_values"]), 2) if g["r_values"] else None
+        return entry
+
+    breakdown = [
+        _build_entry(g, strategy=strategy, symbol=symbol)
+        for (strategy, symbol), g in groups.items()
+    ]
+    breakdown.sort(key=lambda e: e["net_pnl"])
+
+    totals_group = {
+        "trades":   sum(g["trades"] for g in groups.values()),
+        "wins":     sum(g["wins"] for g in groups.values()),
+        "losses":   sum(g["losses"] for g in groups.values()),
+        "net_pnl":  sum(g["net_pnl"] for g in groups.values()),
+        "r_values": [v for g in groups.values() for v in g["r_values"]],
+    }
+    totals = _build_entry(totals_group)
+
+    return {
+        "days":       days,
+        "since":      since.isoformat(),
+        "timezone":   "America/New_York",
+        "breakdown":  breakdown,
+        "totals":     totals,
+    }
+
+
+@app.get("/admin/strategy-breakdown/{secret}")
+async def admin_strategy_breakdown(secret: str, days: int = 1):
     if not ADMIN_SECRET or secret != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
-
     try:
-        db_path = os.getenv("DB_PATH", "trades.db")
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-
-        # Detect whether an R-multiple column exists on this DB before
-        # selecting it — schemas can drift between environments and this
-        # endpoint must not hard-fail if the column is absent.
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)").fetchall()}
-        r_col = "rr" if "rr" in cols else None
-
-        select_cols = "strategy, symbol, result, pnl, exit_time"
-        if r_col:
-            select_cols += f", {r_col}"
-
-        rows = conn.execute(
-            f"SELECT {select_cols} FROM paper_trades "
-            f"WHERE status='CLOSED' AND exit_time IS NOT NULL"
-        ).fetchall()
-        conn.close()
-
-        now_local   = datetime.now(timezone.utc).astimezone(_STRATEGY_BREAKDOWN_TZ)
-        today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        since       = today_start - timedelta(days=max(days, 1) - 1)
-
-        def _parse_exit_time(ts: str) -> datetime:
-            dt = datetime.fromisoformat(ts)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(_STRATEGY_BREAKDOWN_TZ)
-
-        matched = [r for r in rows if _parse_exit_time(r["exit_time"]) >= since]
-
-        groups = {}
-        for r in matched:
-            key = (r["strategy"] or "UNKNOWN", r["symbol"] or "UNKNOWN")
-            g = groups.setdefault(key, {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "r_values": []})
-            g["trades"] += 1
-            if r["result"] == "WIN":
-                g["wins"] += 1
-            elif r["result"] == "LOSS":
-                g["losses"] += 1
-            g["net_pnl"] += r["pnl"] or 0
-            if r_col:
-                r_val = r[r_col]
-                if r_val is not None:
-                    g["r_values"].append(r_val)
-
-        def _build_entry(g: dict, strategy: str = None, symbol: str = None) -> dict:
-            trades = g["trades"]
-            entry = {}
-            if strategy is not None:
-                entry["strategy"] = strategy
-            if symbol is not None:
-                entry["symbol"] = symbol
-            entry.update({
-                "trades":    trades,
-                "wins":      g["wins"],
-                "losses":    g["losses"],
-                "win_rate":  round((g["wins"] / trades) * 100, 1) if trades else 0.0,
-                "net_pnl":   round(g["net_pnl"], 2),
-            })
-            if r_col:
-                entry["avg_r"] = round(sum(g["r_values"]) / len(g["r_values"]), 2) if g["r_values"] else None
-            return entry
-
-        breakdown = [
-            _build_entry(g, strategy=strategy, symbol=symbol)
-            for (strategy, symbol), g in groups.items()
-        ]
-        breakdown.sort(key=lambda e: e["net_pnl"])
-
-        totals_group = {
-            "trades":   sum(g["trades"] for g in groups.values()),
-            "wins":     sum(g["wins"] for g in groups.values()),
-            "losses":   sum(g["losses"] for g in groups.values()),
-            "net_pnl":  sum(g["net_pnl"] for g in groups.values()),
-            "r_values": [v for g in groups.values() for v in g["r_values"]],
-        }
-        totals = _build_entry(totals_group)
-
-        return JSONResponse({
-            "days":       days,
-            "since":      since.isoformat(),
-            "timezone":   "America/New_York",
-            "breakdown":  breakdown,
-            "totals":     totals,
-        })
+        return JSONResponse(_compute_strategy_breakdown(days))
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -696,6 +703,44 @@ async def dashboard(request: Request):
     for sym, b in ctx.get("symbol_bias", {}).items():
         bc = "#9B30FF" if b=="BULL" else "#FF4757" if b=="BEAR" else "#4A2060"
         sym_bias_html += f'<div class="sym-node"><span class="sym-name">{sym}</span><span class="sym-val" style="color:{bc}">{b}</span></div>'
+
+    # Strategy breakdown (7-day, America/New_York) — same read-only query
+    # that powers GET /admin/strategy-breakdown/{secret}, rendered here
+    # server-side so the dashboard never has to expose ADMIN_SECRET client-side.
+    try:
+        breakdown_data = _compute_strategy_breakdown(days=7)
+        breakdown_rows = ""
+        for e in breakdown_data["breakdown"]:
+            pnl_c = "#FFD700" if e["net_pnl"] >= 0 else "#FF4757"
+            avg_r_cell = f'{e["avg_r"]}' if "avg_r" in e and e["avg_r"] is not None else "—"
+            breakdown_rows += f"""<tr>
+              <td class="mono dim">{e['strategy'].replace('_',' ').upper()}</td>
+              <td class="mono">{e['symbol']}</td>
+              <td class="mono">{e['trades']}</td>
+              <td class="mono" style="color:#9B30FF">{e['wins']}</td>
+              <td class="mono" style="color:#FF4757">{e['losses']}</td>
+              <td class="mono">{e['win_rate']}%</td>
+              <td class="mono" style="color:{pnl_c}">${e['net_pnl']:+.2f}</td>
+              <td class="mono dim">{avg_r_cell}</td>
+            </tr>"""
+        if not breakdown_data["breakdown"]:
+            breakdown_html = '<div style="color:var(--dim);font-size:.73rem;letter-spacing:2px;padding:16px 0;font-family:Share Tech Mono,monospace">NO CLOSED TRADES IN LAST 7 DAYS</div>'
+        else:
+            t = breakdown_data["totals"]
+            t_pnl_c = "#FFD700" if t["net_pnl"] >= 0 else "#FF4757"
+            breakdown_html = (
+                '<div class="table-wrap"><table>'
+                '<thead><tr><th>STRATEGY</th><th>SYMBOL</th><th>TRADES</th><th>W</th><th>L</th><th>WIN%</th><th>NET P&amp;L</th><th>AVG R</th></tr></thead>'
+                f'<tbody>{breakdown_rows}'
+                f'<tr style="border-top:2px solid var(--border)"><td class="mono accent" colspan="2">TOTAL</td>'
+                f'<td class="mono">{t["trades"]}</td><td class="mono" style="color:#9B30FF">{t["wins"]}</td>'
+                f'<td class="mono" style="color:#FF4757">{t["losses"]}</td><td class="mono">{t["win_rate"]}%</td>'
+                f'<td class="mono" style="color:{t_pnl_c}">${t["net_pnl"]:+.2f}</td>'
+                f'<td class="mono dim">{t["avg_r"] if "avg_r" in t and t["avg_r"] is not None else "—"}</td></tr>'
+                '</tbody></table></div>'
+            )
+    except Exception as e:
+        breakdown_html = f'<div style="color:var(--red);font-size:.73rem;letter-spacing:1px;padding:16px 0;font-family:Share Tech Mono,monospace">STRATEGY BREAKDOWN UNAVAILABLE: {str(e)[:80]}</div>'
 
     now_str = datetime.utcnow().strftime("%Y.%m.%d  %H:%M:%S UTC")
 
@@ -1160,6 +1205,10 @@ footer::before {{
 <div class="sym-row">
 {sym_bias_html if sym_bias_html else '<span style="color:var(--dim);font-size:.73rem;font-family:Share Tech Mono,monospace;letter-spacing:2px">AWAITING REGIME CLASSIFICATION...</span>'}
 </div>
+
+<!-- STRATEGY BREAKDOWN -->
+<div class="section-label">STRATEGY BREAKDOWN (7D)</div>
+{breakdown_html}
 
 <!-- TODAY'S PERFORMANCE -->
 <div class="section-label">TODAY'S WIN / LOSS</div>
