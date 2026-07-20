@@ -684,6 +684,44 @@ async def dashboard(request: Request):
     win_bar_h  = round((t_wins / bar_max) * 100)
     loss_bar_h = round((t_losses / bar_max) * 100)
 
+    # Win/loss bars for Today / Week / Month / Year, side by side in that
+    # chronological (shortest-to-longest window) order.
+    performance = executor.get_performance_summary()
+
+    def _period_panel(period_label: str, wins: int, losses: int, net_pnl: float) -> str:
+        p_max    = max(wins, losses, 1)
+        w_h      = round((wins / p_max) * 100)
+        l_h      = round((losses / p_max) * 100)
+        total    = wins + losses
+        wr_str   = f"{round((wins / total) * 100)}%" if total > 0 else "---"
+        pnl_clr_ = "#FFD700" if net_pnl >= 0 else "#FF4757"
+        return f"""<div class="period-card">
+          <div class="period-card-label">{period_label}</div>
+          <div class="period-bars">
+            <div class="period-col">
+              <div class="period-bar-count" style="color:#9B30FF">{wins}</div>
+              <div class="period-bar" style="height:{w_h}%;background:#9B30FF;color:#9B30FF"></div>
+              <div class="period-bar-label">W</div>
+            </div>
+            <div class="period-col">
+              <div class="period-bar-count" style="color:#FF4757">{losses}</div>
+              <div class="period-bar" style="height:{l_h}%;background:#FF4757;color:#FF4757"></div>
+              <div class="period-bar-label">L</div>
+            </div>
+          </div>
+          <div class="period-card-foot">
+            <span>{wr_str} WR</span>
+            <span style="color:{pnl_clr_}">${net_pnl:+.2f}</span>
+          </div>
+        </div>"""
+
+    period_grid_html = (
+        _period_panel("TODAY", performance["today"]["wins"], performance["today"]["losses"], performance["today"]["net_pnl"])
+        + _period_panel("THIS WEEK", performance["this_week"]["wins"], performance["this_week"]["losses"], performance["this_week"]["net_pnl"])
+        + _period_panel("THIS MONTH", performance["this_month"]["wins"], performance["this_month"]["losses"], performance["this_month"]["net_pnl"])
+        + _period_panel("THIS YEAR", performance["this_year"]["wins"], performance["this_year"]["losses"], performance["this_year"]["net_pnl"])
+    )
+
     open_rows = ""
     for t in trades_open:
         d      = t["direction"].upper()
@@ -926,6 +964,38 @@ header::after {{
 .chart-side-label {{ font-size:.6rem; letter-spacing:2px; color:var(--dim); font-family:'Share Tech Mono',monospace; }}
 .chart-side-val {{ font-family:'Orbitron',monospace; font-size:1.05rem; font-weight:700; }}
 
+/* WIN/LOSS BY PERIOD (Today / Week / Month / Year, side by side) */
+.period-grid {{
+  display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:32px;
+}}
+.period-card {{
+  background:var(--bg2); border:1px solid var(--borderb); padding:16px;
+  display:flex; flex-direction:column; align-items:center;
+}}
+.period-card-label {{
+  font-family:'Share Tech Mono',monospace; font-size:.63rem; letter-spacing:2px;
+  color:var(--dim); margin-bottom:12px;
+}}
+.period-bars {{ display:flex; align-items:flex-end; gap:16px; height:90px; }}
+.period-col {{ display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; width:36px; }}
+.period-bar {{
+  width:100%; border-radius:2px 2px 0 0; min-height:3px;
+  box-shadow:0 0 12px currentColor; transition:height .5s ease;
+}}
+.period-bar-count {{
+  font-family:'Orbitron',monospace; font-weight:900; font-size:.85rem;
+  margin-bottom:6px; text-shadow:0 0 8px currentColor;
+}}
+.period-bar-label {{
+  font-family:'Share Tech Mono',monospace; font-size:.58rem; letter-spacing:2px;
+  color:var(--dim); margin-top:8px;
+}}
+.period-card-foot {{
+  display:flex; justify-content:space-between; width:100%; margin-top:14px;
+  padding-top:10px; border-top:1px solid var(--border);
+  font-family:'Orbitron',monospace; font-size:.72rem; font-weight:700; color:var(--text);
+}}
+
 /* SYMBOL BIAS */
 .sym-row {{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:32px; }}
 .sym-node {{
@@ -1035,6 +1105,7 @@ footer::before {{
 @media (max-width:700px) {{
   .agent-map {{ grid-template-columns:repeat(2,1fr); }}
   .grid {{ grid-template-columns:repeat(2,1fr); }}
+  .period-grid {{ grid-template-columns:repeat(2,1fr); }}
   .logo-title {{ font-size:1rem; letter-spacing:3px; }}
   .countdown-num {{ font-size:1.8rem; }}
 }}
@@ -1161,6 +1232,12 @@ footer::before {{
     <div><div class="chart-side-label">WIN RATE</div><div class="chart-side-val glow-gold" style="color:var(--gold)">{t_win_rate_str}</div></div>
     <div><div class="chart-side-label">TODAY P&amp;L</div><div class="chart-side-val" style="color:{t_pnl_clr}">${t_pnl:+.2f}</div></div>
   </div>
+</div>
+
+<!-- WIN/LOSS BY PERIOD -->
+<div class="section-label">WIN / LOSS BY PERIOD</div>
+<div class="period-grid">
+{period_grid_html}
 </div>
 
 <!-- OPEN POSITIONS -->

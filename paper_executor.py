@@ -204,9 +204,9 @@ class PaperExecutor:
 
     def get_performance_summary(self) -> dict:
         """
-        TODAY / THIS WEEK (Mon-Sun) / THIS MONTH performance, computed from
-        closed trades, with day boundaries in America/New_York (EST/EDT) —
-        the account's trading timezone.
+        TODAY / THIS WEEK (Mon-Sun) / THIS MONTH / THIS YEAR performance,
+        computed from closed trades, with day boundaries in America/New_York
+        (EST/EDT) — the account's trading timezone.
         """
         rows = self.conn.execute(
             "SELECT result, pnl, exit_time FROM paper_trades WHERE status='CLOSED' AND exit_time IS NOT NULL"
@@ -216,6 +216,7 @@ class PaperExecutor:
         today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start  = today_start - timedelta(days=today_start.weekday())  # Monday
         month_start = today_start.replace(day=1)
+        year_start  = today_start.replace(month=1, day=1)
 
         def bucket(since: datetime) -> dict:
             matched = [r for r in rows if self._parse_exit_time(r["exit_time"]).astimezone(TRADING_TZ) >= since]
@@ -233,6 +234,7 @@ class PaperExecutor:
         today = bucket(today_start)
         week  = bucket(week_start)
         month = bucket(month_start)
+        year  = bucket(year_start)
 
         return {
             "today": {
@@ -246,6 +248,10 @@ class PaperExecutor:
             "this_month": {
                 "net_pnl": month["net_pnl"], "label": month["label"],
                 "wins": month["wins"], "losses": month["losses"],
+            },
+            "this_year": {
+                "net_pnl": year["net_pnl"], "label": year["label"],
+                "wins": year["wins"], "losses": year["losses"],
             },
             "timezone":    "America/New_York",
             "generated_at": now_local.isoformat(),
