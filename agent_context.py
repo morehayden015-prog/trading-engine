@@ -49,12 +49,17 @@ class AgentContext:
             "consecutive_losses": 0,
             "sizing_multiplier": 1.0,       # 0.5–1.5x base risk
 
-            # Per-symbol regime overrides
+            # Per-symbol regime overrides — every symbol the bot trades
+            # (futures + forex majors), not just the futures desk.
             "symbol_bias": {
                 "XAUUSD": "NEUTRAL",
                 "ES":     "NEUTRAL",
                 "NQ":     "NEUTRAL",
                 "CL":     "NEUTRAL",
+                "EURUSD": "NEUTRAL",
+                "GBPUSD": "NEUTRAL",
+                "USDJPY": "NEUTRAL",
+                "AUDUSD": "NEUTRAL",
             },
         }
 

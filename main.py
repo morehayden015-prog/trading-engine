@@ -1140,6 +1140,43 @@ footer::before {{
   <div class="margin-meter-label mono dim">MARGIN UTILIZATION — {margin_pct:.1f}%</div>
 </div>
 
+<!-- TODAY'S PERFORMANCE -->
+<div class="section-label">TODAY'S WIN / LOSS</div>
+<div class="chart-wrap">
+  <div class="chart-bars">
+    <div class="chart-col">
+      <div class="chart-bar-count" style="color:#9B30FF">{t_wins}</div>
+      <div class="chart-bar" style="height:{win_bar_h}%;background:#9B30FF;color:#9B30FF"></div>
+      <div class="chart-bar-label">WINS</div>
+    </div>
+    <div class="chart-col">
+      <div class="chart-bar-count" style="color:#FF4757">{t_losses}</div>
+      <div class="chart-bar" style="height:{loss_bar_h}%;background:#FF4757;color:#FF4757"></div>
+      <div class="chart-bar-label">LOSSES</div>
+    </div>
+  </div>
+  <div class="chart-side">
+    <div><div class="chart-side-label">TRADES TODAY</div><div class="chart-side-val" style="color:var(--text)">{t_total}</div></div>
+    <div><div class="chart-side-label">BREAKEVEN</div><div class="chart-side-val" style="color:var(--dim)">{t_be}</div></div>
+    <div><div class="chart-side-label">WIN RATE</div><div class="chart-side-val glow-gold" style="color:var(--gold)">{t_win_rate_str}</div></div>
+    <div><div class="chart-side-label">TODAY P&amp;L</div><div class="chart-side-val" style="color:{t_pnl_clr}">${t_pnl:+.2f}</div></div>
+  </div>
+</div>
+
+<!-- OPEN POSITIONS -->
+<div class="section-label">OPEN POSITIONS</div>
+{positions_html}
+
+<!-- SYMBOL INTELLIGENCE -->
+<div class="section-label">SYMBOL INTELLIGENCE</div>
+<div class="sym-row">
+{sym_bias_html if sym_bias_html else '<span style="color:var(--dim);font-size:.73rem;font-family:Share Tech Mono,monospace;letter-spacing:2px">AWAITING REGIME CLASSIFICATION...</span>'}
+</div>
+
+<!-- STRATEGY BREAKDOWN -->
+<div class="section-label">STRATEGY BREAKDOWN (7D)</div>
+{breakdown_html}
+
 <!-- AGENT MAP -->
 <div class="section-label">ACTIVE AGENTS</div>
 <div class="agent-map">
@@ -1199,43 +1236,6 @@ footer::before {{
     <div class="agent-freq">OFFLINE</div>
   </div>
 </div>
-
-<!-- SYMBOL INTELLIGENCE -->
-<div class="section-label">SYMBOL INTELLIGENCE</div>
-<div class="sym-row">
-{sym_bias_html if sym_bias_html else '<span style="color:var(--dim);font-size:.73rem;font-family:Share Tech Mono,monospace;letter-spacing:2px">AWAITING REGIME CLASSIFICATION...</span>'}
-</div>
-
-<!-- STRATEGY BREAKDOWN -->
-<div class="section-label">STRATEGY BREAKDOWN (7D)</div>
-{breakdown_html}
-
-<!-- TODAY'S PERFORMANCE -->
-<div class="section-label">TODAY'S WIN / LOSS</div>
-<div class="chart-wrap">
-  <div class="chart-bars">
-    <div class="chart-col">
-      <div class="chart-bar-count" style="color:#9B30FF">{t_wins}</div>
-      <div class="chart-bar" style="height:{win_bar_h}%;background:#9B30FF;color:#9B30FF"></div>
-      <div class="chart-bar-label">WINS</div>
-    </div>
-    <div class="chart-col">
-      <div class="chart-bar-count" style="color:#FF4757">{t_losses}</div>
-      <div class="chart-bar" style="height:{loss_bar_h}%;background:#FF4757;color:#FF4757"></div>
-      <div class="chart-bar-label">LOSSES</div>
-    </div>
-  </div>
-  <div class="chart-side">
-    <div><div class="chart-side-label">TRADES TODAY</div><div class="chart-side-val" style="color:var(--text)">{t_total}</div></div>
-    <div><div class="chart-side-label">BREAKEVEN</div><div class="chart-side-val" style="color:var(--dim)">{t_be}</div></div>
-    <div><div class="chart-side-label">WIN RATE</div><div class="chart-side-val glow-gold" style="color:var(--gold)">{t_win_rate_str}</div></div>
-    <div><div class="chart-side-label">TODAY P&amp;L</div><div class="chart-side-val" style="color:{t_pnl_clr}">${t_pnl:+.2f}</div></div>
-  </div>
-</div>
-
-<!-- OPEN POSITIONS -->
-<div class="section-label">OPEN POSITIONS</div>
-{positions_html}
 
 {countdown_html}
 
