@@ -41,13 +41,17 @@ class AgentContext:
             "fear_greed":       None,       # 0-100
             "fear_greed_label": "UNKNOWN",
             "intel_updated":    None,
+            # Raw VIX/fear-greed based multiplier — an *input* to risk_agent,
+            # kept separate from the final blended "sizing_multiplier" below
+            # so the two agents don't feed off each other's output.
+            "vix_sizing_multiplier": 1.0,
 
             # Risk state (set by risk_agent)
             "daily_pnl":        0.0,
             "weekly_pnl":       0.0,
             "open_count":       0,
             "consecutive_losses": 0,
-            "sizing_multiplier": 1.0,       # 0.5–1.5x base risk
+            "sizing_multiplier": 1.0,       # 0.5–1.5x base risk — risk_agent's final output
 
             # Per-symbol regime overrides — every symbol the bot trades
             # (futures + forex majors), not just the futures desk.

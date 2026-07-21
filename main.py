@@ -29,6 +29,13 @@ from news_checker import is_news_blackout
 from scanner import start_scanner
 from fee_tracker import FeeTracker
 from outcome_labeler import OutcomeLabeler
+# NOTE: auto_labeler.auto_label_loop is intentionally NOT started below.
+# It and trade_monitor_agent_loop both independently poll+close the same
+# open paper_trades rows for XAUUSD/ES/NQ/CL with different TP/SL logic
+# and no coordination, so running both let them race to close the same
+# trade. trade_monitor_agent_loop is the superset (covers all 8 traded
+# symbols, plus BE-move and partial-TP1 handling auto_labeler lacks), so
+# it's the one agent that should own trade closing.
 from auto_calibrate import calibration_loop
 from daily_briefing import briefing_scheduler
 from auto_labeler import auto_label_loop
@@ -71,6 +78,13 @@ ADMIN_SECRET    = os.getenv("ADMIN_SECRET", "")
 # ── Webhook dedupe (TradingView sometimes double-fires the same alert) ──
 DEDUPE_WINDOW_SECONDS = 10
 _recent_signals: dict = {}   # fingerprint -> unix timestamp of last accepted signal
+
+# Guards the "check MAX_CONCURRENT, then open_trade" sequence below so two
+# webhook requests arriving close together (TradingView bursts, or the
+# scanner + a manual alert overlapping) can't both pass the count check
+# before either has inserted its row and end up opening more than
+# MAX_CONCURRENT positions.
+_open_trade_lock = asyncio.Lock()
 
 
 def _signal_fingerprint(symbol: str, strategy: str, direction: str, price: float) -> str:
@@ -200,7 +214,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(start_scanner())
     asyncio.create_task(calibration_loop())
     asyncio.create_task(briefing_scheduler())
-    asyncio.create_task(auto_label_loop(executor, labeler))
+    # auto_label_loop deliberately not started — see NOTE at the auto_labeler
+    # import above. trade_monitor_agent_loop (started above) owns trade closing.
     yield
     executor.close()
     memory.close()
@@ -231,7 +246,16 @@ async def webhook(request: Request):
     direction = signal.get("direction", signal.get("action", "buy"))
     strategy  = signal.get("strategy", "unknown")
     timeframe = signal.get("timeframe", "5m")
-    price     = float(signal.get("price", 0))
+    try:
+        price = float(signal.get("price", 0))
+    except (TypeError, ValueError):
+        price = 0.0
+    if price <= 0:
+        # Previously a missing/malformed price silently became 0.0 and was
+        # used as the real entry_price — opening a trade at price 0 instead
+        # of rejecting the signal.
+        log.warning(f"Webhook rejected: invalid/missing price for {symbol} ({signal.get('price')!r})")
+        return JSONResponse({"status": "ignored", "reason": "invalid or missing price"})
 
     # Dedupe — TradingView sometimes fires the same alert twice within seconds,
     # which used to create duplicate trades with different Trade IDs.
@@ -247,8 +271,11 @@ async def webhook(request: Request):
     if not is_market_open():
         return JSONResponse({"status": "ignored", "reason": "weekend — markets closed"})
 
-    # News blackout check
-    if is_news_blackout(symbol):
+    # News blackout check — is_news_blackout() does a blocking httpx.get()
+    # (up to 8s) on a cache miss. Called directly, that stalls the entire
+    # event loop (every other request + all background agent loops) for up
+    # to 8 seconds. Push it to a thread so only this request waits.
+    if await asyncio.to_thread(is_news_blackout, symbol):
         log.info(f"Trade blocked for {symbol}: news blackout active")
         return JSONResponse({"status": "ignored", "reason": "news blackout"})
 
@@ -290,25 +317,43 @@ async def webhook(request: Request):
     # Apply dynamic sizing from risk agent
     sizing_mult = context.get("sizing_multiplier", 1.0)
 
-    # Score signal
-    scored     = score_signal(symbol, direction, strategy, timeframe, ai_confidence)
+    # Score signal — pass the strategy's recent win rate so score_signal's
+    # performance-tier gate (perf_multiplier) actually does something. This
+    # was previously never supplied, so perf_multiplier was always 1.0 and
+    # the "auto-disable poor performers via score" path was dead code.
+    strat_stats = memory.get_strategy_stats(symbol, strategy, n=20)
+    scored     = score_signal(
+        symbol, direction, strategy, timeframe, ai_confidence,
+        strategy_win_rate=strat_stats.get("win_rate"),
+    )
     score_total = scored["total"]
     log.info(f"Signal scored {score_total:.2f} | {symbol} {direction} {strategy} | AI conf={ai_confidence:.2f}")
 
     if score_total < 6.5:
         return JSONResponse({"status": "ignored", "reason": f"score too low ({score_total:.2f})"})
 
-    # Execute trade
+    # Execute trade — re-check MAX_CONCURRENT + insert atomically under a
+    # lock. The earlier check (line ~264) is just a cheap early-exit before
+    # the AI call; this is the authoritative one.
+    async with _open_trade_lock:
+        if executor.get_open_count() >= MAX_CONCURRENT:
+            log.info(f"Trade blocked at final check: {executor.get_open_count()}/{MAX_CONCURRENT} positions open")
+            return JSONResponse({"status": "ignored", "reason": f"max concurrent positions ({MAX_CONCURRENT}) reached"})
+        try:
+            trade = executor.open_trade(
+                symbol=symbol,
+                direction=direction,
+                strategy=strategy,
+                timeframe=timeframe,
+                price=price,
+                score=score_total,
+                sizing_multiplier=sizing_mult,
+            )
+        except Exception as e:
+            log.error(f"Trade execution failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     try:
-        trade = executor.open_trade(
-            symbol=symbol,
-            direction=direction,
-            strategy=strategy,
-            timeframe=timeframe,
-            price=price,
-            score=score_total,
-            sizing_multiplier=sizing_mult,
-        )
         memory.record_signal(
             symbol=symbol,
             direction=direction,

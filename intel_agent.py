@@ -137,7 +137,7 @@ async def intel_agent_loop():
                 dxy_trend=dxy_trend,
                 fear_greed=fear_greed,
                 fear_greed_label=fear_greed_label,
-                sizing_multiplier=sizing_mult,
+                vix_sizing_multiplier=sizing_mult,
                 intel_updated=datetime.now(timezone.utc).isoformat(),
             )
 

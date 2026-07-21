@@ -154,13 +154,20 @@ class PaperExecutor:
         log.info(f"Paper trade closed | {trade_id} | {result} | P&L={pnl:+.2f}")
 
     def get_open_trades(self) -> list:
+        # PARTIAL trades still carry real exposure (the runner leg from a
+        # TP1 scale-out hasn't hit TP2/TP3/SL yet) — they belong here, not
+        # just plain 'OPEN' rows, or that exposure silently disappears from
+        # every view that calls this (dashboard, /trades, position sizing).
         rows = self.conn.execute(
-            "SELECT trade_id, symbol, direction, strategy, entry_price, entry_time, risk_pct, score FROM paper_trades WHERE status='OPEN'"
+            "SELECT trade_id, symbol, direction, strategy, entry_price, entry_time, risk_pct, score "
+            "FROM paper_trades WHERE status IN ('OPEN', 'PARTIAL')"
         ).fetchall()
         return [dict(r) for r in rows]
 
     def get_open_count(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) as n FROM paper_trades WHERE status='OPEN'").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) as n FROM paper_trades WHERE status IN ('OPEN', 'PARTIAL')"
+        ).fetchone()
         return row["n"] if row else 0
 
     def get_session_stats(self) -> dict:
@@ -178,12 +185,20 @@ class PaperExecutor:
         }
 
     def get_today_stats(self) -> dict:
-        """Wins/losses/BE + P&L for trades closed today (UTC)."""
-        today = datetime.utcnow().strftime("%Y-%m-%d")
+        """
+        Wins/losses/BE + P&L for trades closed today, using the same
+        America/New_York day boundary as get_performance_summary() — this
+        previously used a UTC calendar-date boundary instead, so the
+        dashboard's "Today" card and the "TODAY'S WIN/LOSS" panel could
+        disagree by several hours' worth of trades (UTC midnight is
+        7-8pm NY, mid-session).
+        """
+        now_local   = datetime.now(timezone.utc).astimezone(TRADING_TZ)
+        today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         rows = self.conn.execute(
-            "SELECT result, pnl FROM paper_trades WHERE status='CLOSED' AND exit_time LIKE ?",
-            (f"{today}%",),
+            "SELECT result, pnl, exit_time FROM paper_trades WHERE status='CLOSED' AND exit_time IS NOT NULL"
         ).fetchall()
+        rows = [r for r in rows if self._parse_exit_time(r["exit_time"]).astimezone(TRADING_TZ) >= today_start]
         total    = len(rows)
         wins     = sum(1 for r in rows if r["result"] == "WIN")
         losses   = sum(1 for r in rows if r["result"] == "LOSS")
@@ -265,9 +280,13 @@ class PaperExecutor:
         margin footprint since this is a fixed-R paper model rather than
         a live-priced margin account.
         """
+        # A PARTIAL trade has already scaled half its size out at TP1, so
+        # only half its original risk_dollars is still committed as margin
+        # for the runner leg.
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(risk_dollars), 0) as used, COUNT(*) as n "
-            "FROM paper_trades WHERE status='OPEN'"
+            "SELECT COALESCE(SUM(CASE WHEN status='PARTIAL' THEN risk_dollars / 2.0 ELSE risk_dollars END), 0) as used, "
+            "COUNT(*) as n "
+            "FROM paper_trades WHERE status IN ('OPEN', 'PARTIAL')"
         ).fetchone()
         used      = round(row["used"] or 0.0, 2)
         available = round(max(ACCOUNT_SIZE - used, 0.0), 2)

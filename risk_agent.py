@@ -164,7 +164,12 @@ async def risk_agent_loop():
             weekly_pnl   = _get_pnl(days=7)
             consecutive  = _get_consecutive_losses()
             open_pos     = _get_open_positions()
-            vix_mult     = context.get("sizing_multiplier", 1.0)
+            # Read intel_agent's raw VIX/fear-greed multiplier, NOT this
+            # agent's own prior output — previously both read/wrote
+            # "sizing_multiplier", so risk_agent was compounding its own
+            # result on every 60s tick instead of applying intel_agent's
+            # actual (15-min) VIX signal.
+            vix_mult     = context.get("vix_sizing_multiplier", 1.0)
             regime       = context.get("regime", "UNKNOWN")
 
             sizing = calc_dynamic_sizing(
