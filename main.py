@@ -1334,7 +1334,7 @@ footer::before {{
     <div class="agent-ping"></div>
     <div class="agent-icon">⊞</div>
     <div class="agent-name">SCANNER</div>
-    <div class="agent-status">16 STRATEGIES<br>8 MARKETS</div>
+    <div class="agent-status">6 STRATEGIES<br>8 MARKETS</div>
     <div class="agent-freq">↻ 5 MIN</div>
   </div>
   <div class="agent-node">

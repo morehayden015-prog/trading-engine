@@ -25,9 +25,7 @@ REENABLE_ABOVE = float(os.getenv("STRATEGY_REENABLE_WR", "0.50"))  # re-enable i
 
 ALL_STRATEGIES = [
     "sweep_bos_fvg", "rp_profits", "ict_5step", "orb_scalp",
-    "supply_demand", "mamba_scalp", "turtle_soup", "silver_bullet",
-    "judas_swing", "engulfing", "pin_bar", "inside_bar",
-    "morning_star", "vwap_reclaim", "ema_cross", "rsi_divergence",
+    "supply_demand", "mamba_scalp",
 ]
 
 # Every symbol the bot trades — previously futures-only, so forex
