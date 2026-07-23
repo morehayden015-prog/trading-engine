@@ -20,6 +20,9 @@ LOG_DIR  = Path(os.getenv("LOG_DIR", "logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 client       = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# No longer used directly here — FeeTracker() now sources current
+# compounding equity itself. Left in case anything else in this file needs
+# the raw starting-balance figure later.
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "10000"))
 
 BRIEFING_SYSTEM = """You are Hayden's personal trading analyst. Every morning you generate a concise, actionable daily briefing.
@@ -72,7 +75,9 @@ def _get_strategy_summary() -> str:
 def _get_circuit_breaker_summary() -> str:
     try:
         from fee_tracker import FeeTracker
-        ft     = FeeTracker(account_size=ACCOUNT_SIZE)
+        # No account_size override — FeeTracker now defaults to current
+        # compounding equity (starting balance + realized P&L) on its own.
+        ft     = FeeTracker()
         cb     = ft.get_circuit_breaker_status()
         ft.close()
         status = cb["status"].upper()

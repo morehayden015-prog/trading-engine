@@ -7,6 +7,8 @@ import os
 import logging
 from datetime import datetime, timezone
 
+from calibrate import load_weights, DEFAULT_WEIGHTS
+
 log = logging.getLogger(__name__)
 
 # ── Session scoring by symbol ─────────────────────────────────────────────────
@@ -91,12 +93,17 @@ def score_signal(
         else:
             perf_multiplier = 0.0   # auto-disable
 
-    # Weighted total
+    # Weighted total — pulls live weights from scoring_weights.json (written
+    # by calibrate.py's weekly/every-10-trades calibration cycle). Previously
+    # this was hardcoded to the same numbers as calibrate.DEFAULT_WEIGHTS,
+    # so calibration ran every cycle and updated the file but never actually
+    # changed live scoring.
+    weights = load_weights()
     raw_total = (
-        session_score  * 0.20 +
-        strategy_score * 0.25 +
-        tf_score       * 0.15 +
-        ai_score       * 0.40
+        session_score  * weights.get("session",   DEFAULT_WEIGHTS["session"]) +
+        strategy_score * weights.get("strategy",  DEFAULT_WEIGHTS["strategy"]) +
+        tf_score       * weights.get("timeframe", DEFAULT_WEIGHTS["timeframe"]) +
+        ai_score       * weights.get("ai",        DEFAULT_WEIGHTS["ai"])
     )
 
     total = round(raw_total * market_fit * perf_multiplier, 2)

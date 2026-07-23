@@ -51,6 +51,35 @@ TP_DISTANCES = {
 }
 
 
+def compute_trade_levels(symbol: str, direction: str, entry_price: float,
+                          current_sl: float | None = None,
+                          be_moved: bool = False) -> dict:
+    """
+    Pure price-level calculator shared with the dashboard/API display code
+    (main.py, paper_executor.py) so TP1/TP2/TP3/SL shown to the user always
+    match exactly what this monitor loop is actually managing against —
+    no separate/duplicate distance table to drift out of sync.
+
+    Returns absolute price levels, not distances. `sl` reflects breakeven
+    once be_moved is true, mirroring the live management logic above.
+    """
+    levels = TP_DISTANCES.get(symbol, TP_DISTANCES["XAUUSD"])
+    is_long = direction.upper() in ("BUY", "LONG")
+
+    if be_moved and current_sl is not None:
+        sl = current_sl
+    else:
+        sl = (entry_price - levels["SL"]) if is_long else (entry_price + levels["SL"])
+
+    sign = 1 if is_long else -1
+    return {
+        "sl":  round(sl, 5),
+        "tp1": round(entry_price + sign * levels["TP1"], 5),
+        "tp2": round(entry_price + sign * levels["TP2"], 5),
+        "tp3": round(entry_price + sign * levels["TP3"], 5),
+    }
+
+
 def _get_price(symbol: str) -> float | None:
     try:
         ticker = SYMBOL_MAP.get(symbol)
@@ -105,12 +134,17 @@ def _get_open_trades() -> list:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
+            # PARTIAL trades (TP1 already scaled out, runner still live) must
+            # keep being monitored here too, or the runner's remaining size
+            # never reaches TP2/TP3/SL and the trade is stuck at status
+            # 'PARTIAL' forever — invisible to open-position counts AND to
+            # closed-trade analysis.
             """SELECT trade_id, symbol, direction, strategy, entry_price,
                       risk_dollars, rr, score,
                       COALESCE(be_moved, 0) as be_moved,
                       COALESCE(tp1_hit, 0) as tp1_hit,
                       COALESCE(current_sl, entry_price) as current_sl
-               FROM paper_trades WHERE status='OPEN'"""
+               FROM paper_trades WHERE status IN ('OPEN', 'PARTIAL')"""
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -119,16 +153,27 @@ def _get_open_trades() -> list:
         return []
 
 
+_MANAGEMENT_COLUMNS = [
+    "be_moved INTEGER DEFAULT 0",
+    "tp1_hit INTEGER DEFAULT 0",
+    "current_sl REAL",
+    "partial_pnl_banked REAL DEFAULT 0",
+]
+
+
+def _ensure_management_columns(conn):
+    for col in _MANAGEMENT_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col}")
+        except Exception:
+            pass  # column already exists
+
+
 def _update_trade_meta(trade_id: str, **kwargs):
     """Update trade management columns (BE moved, TP1 hit, trailing SL)."""
     try:
         conn = sqlite3.connect(DB_PATH)
-        # Ensure management columns exist
-        for col in ["be_moved INTEGER DEFAULT 0", "tp1_hit INTEGER DEFAULT 0", "current_sl REAL"]:
-            try:
-                conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col}")
-            except Exception:
-                pass  # column already exists
+        _ensure_management_columns(conn)
 
         sets = ", ".join(f"{k}=?" for k in kwargs)
         vals = list(kwargs.values()) + [trade_id]
@@ -140,34 +185,64 @@ def _update_trade_meta(trade_id: str, **kwargs):
 
 
 def _close_trade_in_db(trade_id: str, result: str, exit_price: float, partial: bool = False):
-    """Close trade in DB, calculate P&L. Returns (pnl, risk_pct, risk_dollars)."""
+    """
+    Close (or partially close) a trade in the DB and calculate P&L.
+    Returns (pnl, risk_pct, risk_dollars).
+
+    A trade that already had its TP1 partial banked (tp1_hit=1) only has
+    HALF its original risk still on the table for the runner leg — the
+    final pnl must be partial_pnl_banked + the runner leg's own P&L, not
+    a fresh full-size calculation (which would silently discard the
+    profit/loss already realized at TP1).
+    """
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        row  = conn.execute(
-            "SELECT risk_pct, risk_dollars, rr FROM paper_trades WHERE trade_id=?", (trade_id,)
+        _ensure_management_columns(conn)
+        row = conn.execute(
+            "SELECT risk_pct, risk_dollars, rr, COALESCE(tp1_hit, 0) as tp1_hit, "
+            "COALESCE(partial_pnl_banked, 0) as partial_pnl_banked "
+            "FROM paper_trades WHERE trade_id=?", (trade_id,)
         ).fetchone()
 
         if not row:
             conn.close()
             return 0.0, None, None
 
-        risk_pct = row["risk_pct"]
-        risk_usd = row["risk_dollars"]
-        rr       = row["rr"]
+        risk_pct    = row["risk_pct"]
+        risk_usd    = row["risk_dollars"]
+        rr          = row["rr"]
+        already_partial = bool(row["tp1_hit"])
+        banked      = row["partial_pnl_banked"] or 0.0
 
-        if result == "WIN":
-            pnl = round(risk_usd * (rr / 2 if partial else rr), 2)
-        elif result == "LOSS":
-            pnl = round(-risk_usd, 2)
+        if partial:
+            # First (TP1) partial close — banks half the size's worth of profit.
+            pnl = round(risk_usd * (rr / 2), 2)
         else:
-            pnl = 0.0
+            # Final close of the runner leg. If TP1 already partialed out,
+            # only half the original risk is still open for this leg.
+            remaining_risk = risk_usd / 2 if already_partial else risk_usd
+            if result == "WIN":
+                leg_pnl = round(remaining_risk * rr, 2)
+            elif result == "LOSS":
+                leg_pnl = round(-remaining_risk, 2)
+            else:
+                leg_pnl = 0.0
+            pnl = round(banked + leg_pnl, 2)
 
         status = "PARTIAL" if partial else "CLOSED"
-        conn.execute(
-            "UPDATE paper_trades SET result=?, exit_price=?, exit_time=?, pnl=?, status=? WHERE trade_id=?",
-            (result, exit_price, datetime.utcnow().isoformat(), pnl, status, trade_id),
-        )
+        params = [result, exit_price, datetime.utcnow().isoformat(), pnl, status, trade_id]
+        if partial:
+            conn.execute(
+                "UPDATE paper_trades SET result=?, exit_price=?, exit_time=?, pnl=?, status=?, "
+                "partial_pnl_banked=? WHERE trade_id=?",
+                params[:-1] + [pnl, trade_id],
+            )
+        else:
+            conn.execute(
+                "UPDATE paper_trades SET result=?, exit_price=?, exit_time=?, pnl=?, status=? WHERE trade_id=?",
+                params,
+            )
         conn.commit()
         conn.close()
         return pnl, risk_pct, risk_usd
@@ -185,11 +260,7 @@ async def trade_monitor_agent_loop():
     # Ensure management columns exist on startup
     try:
         conn = sqlite3.connect(DB_PATH)
-        for col in ["be_moved INTEGER DEFAULT 0", "tp1_hit INTEGER DEFAULT 0", "current_sl REAL"]:
-            try:
-                conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col}")
-            except Exception:
-                pass
+        _ensure_management_columns(conn)
         conn.commit()
         conn.close()
     except Exception:

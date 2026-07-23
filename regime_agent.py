@@ -1,7 +1,8 @@
 """
 regime_agent.py — Market Regime Classification Agent
 Runs every 30 minutes. Uses Claude with web search to classify
-the current market regime across all 4 markets.
+the current market regime across every market the bot trades
+(futures + forex majors — see ALL_SYMBOLS below).
 
 Updates AgentContext with:
   - regime (global)
@@ -25,9 +26,14 @@ log = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-REGIME_SYSTEM = """You are an elite market regime classifier for a trading bot.
+# Every symbol the bot actually trades (futures + forex majors) — keep this
+# in sync with ALLOWED_SYMBOLS in main.py so Symbol Intelligence covers the
+# full traded universe, not just the futures desk.
+ALL_SYMBOLS = ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]
 
-Your job: classify the current market regime for XAUUSD, ES, NQ, and CL futures.
+REGIME_SYSTEM = f"""You are an elite market regime classifier for a trading bot.
+
+Your job: classify the current market regime for {", ".join(ALL_SYMBOLS)} (futures + forex majors).
 
 Regimes:
 - TRENDING_BULL: Strong uptrend, momentum favors longs
@@ -44,19 +50,23 @@ Use web search to check:
 5. Overall market sentiment
 
 Return ONLY valid JSON:
-{
+{{
   "global_regime": "TRENDING_BULL|TRENDING_BEAR|RANGING|VOLATILE|TRANSITIONING",
   "trade_bias": "STRONG_BULL|BULL|NEUTRAL|BEAR|STRONG_BEAR",
-  "symbol_bias": {
+  "symbol_bias": {{
     "XAUUSD": "BULL|BEAR|NEUTRAL",
     "ES": "BULL|BEAR|NEUTRAL",
     "NQ": "BULL|BEAR|NEUTRAL",
-    "CL": "BULL|BEAR|NEUTRAL"
-  },
+    "CL": "BULL|BEAR|NEUTRAL",
+    "EURUSD": "BULL|BEAR|NEUTRAL",
+    "GBPUSD": "BULL|BEAR|NEUTRAL",
+    "USDJPY": "BULL|BEAR|NEUTRAL",
+    "AUDUSD": "BULL|BEAR|NEUTRAL"
+  }},
   "reasoning": "2-3 sentence summary of current conditions",
   "key_risk": "biggest market risk right now",
   "confidence": 0.0-1.0
-}"""
+}}"""
 
 
 async def classify_regime() -> dict:
@@ -78,7 +88,7 @@ Available context:
 - DXY trend: {dxy_trend}
 - Fear & Greed: {fear_greed} ({ctx.get('fear_greed_label', 'unknown')})
 
-Use web search to check current prices and news for XAUUSD, ES, NQ, CL.
+Use web search to check current prices and news for {", ".join(ALL_SYMBOLS)}.
 Return ONLY the JSON object."""
 
     try:
@@ -114,7 +124,7 @@ Return ONLY the JSON object."""
         return {
             "global_regime": "UNKNOWN",
             "trade_bias":    "NEUTRAL",
-            "symbol_bias":   {"XAUUSD": "NEUTRAL", "ES": "NEUTRAL", "NQ": "NEUTRAL", "CL": "NEUTRAL"},
+            "symbol_bias":   {sym: "NEUTRAL" for sym in ALL_SYMBOLS},
             "reasoning":     f"Classification failed: {e}",
             "key_risk":      "Unknown",
             "confidence":    0.0,

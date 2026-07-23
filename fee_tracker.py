@@ -11,9 +11,14 @@ import sqlite3
 import logging
 from datetime import datetime, timezone, timedelta
 
+from paper_executor import get_current_equity
+
 log = logging.getLogger(__name__)
 
 DB_PATH      = os.getenv("DB_PATH", "trades.db")
+# Starting balance fallback only — see get_current_equity() for the actual
+# equity figure (starting balance + realized P&L) that circuit-breaker
+# thresholds are computed against below.
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "10000"))
 
 DAILY_LOSS_LIMIT_PCT  = float(os.getenv("DAILY_LOSS_LIMIT_PCT",  "3.0"))
@@ -23,7 +28,10 @@ CONSEC_LOSS_LIMIT     = int(os.getenv("CONSEC_LOSS_LIMIT",       "4"))
 
 class FeeTracker:
     def __init__(self, account_size: float = None):
-        self.account_size = account_size or ACCOUNT_SIZE
+        # Compounding by default: daily/weekly loss-limit thresholds scale
+        # with the account's actual current equity, not a fixed starting
+        # balance. Callers that explicitly pass account_size still override.
+        self.account_size = account_size if account_size is not None else get_current_equity(DB_PATH)
         self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 

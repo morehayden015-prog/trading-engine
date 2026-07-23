@@ -70,10 +70,15 @@ class OutcomeLabeler:
 
         for trade in open_trades:
             trade_id    = trade["trade_id"]
-            direction   = trade["direction"]
+            # Actual stored direction values are lowercase "buy"/"sell" (see
+            # main.py webhook, scanner.py), never the literal "LONG" — this
+            # comparison always fell through to the SHORT branch below,
+            # inverting TP/SL for real long trades. Normalize + accept both
+            # conventions, matching trade_monitor_agent.py / auto_labeler.py.
+            direction   = trade["direction"].upper()
             entry_price = trade["entry_price"]
 
-            if direction == "LONG":
+            if direction in ("BUY", "LONG"):
                 tp1 = entry_price + levels["TP1"]
                 sl  = entry_price - levels["SL"]
                 if current_price >= tp1:

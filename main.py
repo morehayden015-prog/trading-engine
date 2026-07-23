@@ -29,6 +29,13 @@ from news_checker import is_news_blackout
 from scanner import start_scanner
 from fee_tracker import FeeTracker
 from outcome_labeler import OutcomeLabeler
+# NOTE: auto_labeler.auto_label_loop is intentionally NOT started below.
+# It and trade_monitor_agent_loop both independently poll+close the same
+# open paper_trades rows for XAUUSD/ES/NQ/CL with different TP/SL logic
+# and no coordination, so running both let them race to close the same
+# trade. trade_monitor_agent_loop is the superset (covers all 8 traded
+# symbols, plus BE-move and partial-TP1 handling auto_labeler lacks), so
+# it's the one agent that should own trade closing.
 from auto_calibrate import calibration_loop
 from daily_briefing import briefing_scheduler
 from auto_labeler import auto_label_loop
@@ -71,6 +78,13 @@ ADMIN_SECRET    = os.getenv("ADMIN_SECRET", "")
 # ── Webhook dedupe (TradingView sometimes double-fires the same alert) ──
 DEDUPE_WINDOW_SECONDS = 10
 _recent_signals: dict = {}   # fingerprint -> unix timestamp of last accepted signal
+
+# Guards the "check MAX_CONCURRENT, then open_trade" sequence below so two
+# webhook requests arriving close together (TradingView bursts, or the
+# scanner + a manual alert overlapping) can't both pass the count check
+# before either has inserted its row and end up opening more than
+# MAX_CONCURRENT positions.
+_open_trade_lock = asyncio.Lock()
 
 
 def _signal_fingerprint(symbol: str, strategy: str, direction: str, price: float) -> str:
@@ -200,7 +214,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(start_scanner())
     asyncio.create_task(calibration_loop())
     asyncio.create_task(briefing_scheduler())
-    asyncio.create_task(auto_label_loop(executor, labeler))
+    # auto_label_loop deliberately not started — see NOTE at the auto_labeler
+    # import above. trade_monitor_agent_loop (started above) owns trade closing.
     yield
     executor.close()
     memory.close()
@@ -231,7 +246,16 @@ async def webhook(request: Request):
     direction = signal.get("direction", signal.get("action", "buy"))
     strategy  = signal.get("strategy", "unknown")
     timeframe = signal.get("timeframe", "5m")
-    price     = float(signal.get("price", 0))
+    try:
+        price = float(signal.get("price", 0))
+    except (TypeError, ValueError):
+        price = 0.0
+    if price <= 0:
+        # Previously a missing/malformed price silently became 0.0 and was
+        # used as the real entry_price — opening a trade at price 0 instead
+        # of rejecting the signal.
+        log.warning(f"Webhook rejected: invalid/missing price for {symbol} ({signal.get('price')!r})")
+        return JSONResponse({"status": "ignored", "reason": "invalid or missing price"})
 
     # Dedupe — TradingView sometimes fires the same alert twice within seconds,
     # which used to create duplicate trades with different Trade IDs.
@@ -243,12 +267,39 @@ async def webhook(request: Request):
         )
         return JSONResponse({"status": "duplicate_ignored"})
 
+    # Re-entry cooldown — the fingerprint dedupe above only catches an exact
+    # price match within DEDUPE_WINDOW_SECONDS (10s), which is meant for
+    # TradingView literally double-firing the same alert. It does NOT catch
+    # the scanner (or a resent alert) re-detecting the same structure/move
+    # minutes later at a slightly different price — which is a distinct
+    # signal by that definition but still re-enters a symbol+strategy we
+    # already just traded. scanner.py has its own 30-minute cooldown, but it
+    # lives only in that process's memory and is wiped by any restart, or
+    # skipped entirely if the scanner's own webhook POST times out before
+    # this handler responds (both have happened). This check reads
+    # paper_trades directly — the durable source of truth — so it holds even
+    # if those in-memory guards fail.
+    COOLDOWN_MINUTES = 20
+    recent = executor.get_recent_or_open_trade(symbol, strategy, cooldown_minutes=COOLDOWN_MINUTES)
+    if recent:
+        log.warning(
+            f"RE-ENTRY BLOCKED: {symbol}/{strategy} — {recent['status']} trade "
+            f"{recent['trade_id']} still within {COOLDOWN_MINUTES}min cooldown"
+        )
+        return JSONResponse({
+            "status": "ignored",
+            "reason": f"cooldown active for {symbol}/{strategy} ({recent['status']} trade {recent['trade_id']})",
+        })
+
     # Weekend guard — no AI calls on weekends
     if not is_market_open():
         return JSONResponse({"status": "ignored", "reason": "weekend — markets closed"})
 
-    # News blackout check
-    if is_news_blackout(symbol):
+    # News blackout check — is_news_blackout() does a blocking httpx.get()
+    # (up to 8s) on a cache miss. Called directly, that stalls the entire
+    # event loop (every other request + all background agent loops) for up
+    # to 8 seconds. Push it to a thread so only this request waits.
+    if await asyncio.to_thread(is_news_blackout, symbol):
         log.info(f"Trade blocked for {symbol}: news blackout active")
         return JSONResponse({"status": "ignored", "reason": "news blackout"})
 
@@ -290,25 +341,43 @@ async def webhook(request: Request):
     # Apply dynamic sizing from risk agent
     sizing_mult = context.get("sizing_multiplier", 1.0)
 
-    # Score signal
-    scored     = score_signal(symbol, direction, strategy, timeframe, ai_confidence)
+    # Score signal — pass the strategy's recent win rate so score_signal's
+    # performance-tier gate (perf_multiplier) actually does something. This
+    # was previously never supplied, so perf_multiplier was always 1.0 and
+    # the "auto-disable poor performers via score" path was dead code.
+    strat_stats = memory.get_strategy_stats(symbol, strategy, n=20)
+    scored     = score_signal(
+        symbol, direction, strategy, timeframe, ai_confidence,
+        strategy_win_rate=strat_stats.get("win_rate"),
+    )
     score_total = scored["total"]
     log.info(f"Signal scored {score_total:.2f} | {symbol} {direction} {strategy} | AI conf={ai_confidence:.2f}")
 
     if score_total < 6.5:
         return JSONResponse({"status": "ignored", "reason": f"score too low ({score_total:.2f})"})
 
-    # Execute trade
+    # Execute trade — re-check MAX_CONCURRENT + insert atomically under a
+    # lock. The earlier check (line ~264) is just a cheap early-exit before
+    # the AI call; this is the authoritative one.
+    async with _open_trade_lock:
+        if executor.get_open_count() >= MAX_CONCURRENT:
+            log.info(f"Trade blocked at final check: {executor.get_open_count()}/{MAX_CONCURRENT} positions open")
+            return JSONResponse({"status": "ignored", "reason": f"max concurrent positions ({MAX_CONCURRENT}) reached"})
+        try:
+            trade = executor.open_trade(
+                symbol=symbol,
+                direction=direction,
+                strategy=strategy,
+                timeframe=timeframe,
+                price=price,
+                score=score_total,
+                sizing_multiplier=sizing_mult,
+            )
+        except Exception as e:
+            log.error(f"Trade execution failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     try:
-        trade = executor.open_trade(
-            symbol=symbol,
-            direction=direction,
-            strategy=strategy,
-            timeframe=timeframe,
-            price=price,
-            score=score_total,
-            sizing_multiplier=sizing_mult,
-        )
         memory.record_signal(
             symbol=symbol,
             direction=direction,
@@ -392,6 +461,107 @@ async def stats():
 async def agent_context_endpoint():
     """Return the full shared agent context snapshot."""
     return JSONResponse(context.snapshot())
+
+
+def _build_chat_context() -> str:
+    """
+    Snapshot of live account/trade data handed to Claude for /chat, so it
+    answers from the actual current state instead of guessing. Read-only —
+    reuses the same helpers the dashboard renders from.
+    """
+    ft = FeeTracker()
+    cb = ft.get_circuit_breaker_status()
+    ft.close()
+
+    margin      = executor.get_margin_status()
+    stats       = executor.get_session_stats()
+    today_stats = executor.get_today_stats()
+    performance = executor.get_performance_summary()
+    open_trades = executor.get_open_trades()
+    ctx         = context.snapshot()
+
+    try:
+        by_strategy_7d   = _compute_strategy_breakdown(days=7)["by_strategy"]
+        by_strategy_all  = _compute_strategy_breakdown(days=None)["by_strategy"]
+    except Exception:
+        by_strategy_7d, by_strategy_all = [], []
+
+    open_summary = [
+        {
+            "id": t["trade_id"], "symbol": t["symbol"], "direction": t["direction"],
+            "strategy": t["strategy"], "entry": t["entry_price"], "score": t["score"],
+            "sl": t.get("sl"), "tp1": t.get("tp1"), "tp2": t.get("tp2"), "tp3": t.get("tp3"),
+            "opened": t["entry_time"],
+        }
+        for t in open_trades
+    ]
+
+    return json.dumps({
+        "mode": MODE, "phase": PHASE, "market_open": is_market_open(),
+        "circuit_breaker": cb,
+        "margin": margin,
+        "session_stats": stats,
+        "today_stats": today_stats,
+        "performance_today_week_month_year": performance,
+        "open_trades": open_summary,
+        "strategy_performance_7d": by_strategy_7d,
+        "strategy_performance_all_time": by_strategy_all,
+        "market_context": {
+            "regime": ctx.get("regime"), "trade_bias": ctx.get("trade_bias"),
+            "vix": ctx.get("vix"), "vix_regime": ctx.get("vix_regime"),
+            "fear_greed": ctx.get("fear_greed"), "dxy_trend": ctx.get("dxy_trend"),
+            "sizing_multiplier": ctx.get("sizing_multiplier"),
+        },
+    }, default=str)
+
+
+CHAT_SYSTEM_PROMPT = """You are Hayden, the trading bot's own voice — the user talks to you directly \
+to check on how you (the paper-trading bot) are performing. You are given a live JSON snapshot of the \
+account: margin/equity, open trades with entry/SL/TP1-3, closed-trade stats for today/week/month/year, \
+per-strategy win rate and P&L (7-day and all-time), circuit breaker status, and market context (regime, \
+VIX, DXY, sizing multiplier).
+
+Answer the user's question conversationally and specifically, using only numbers from the provided \
+snapshot — never invent a figure that isn't there. If something isn't in the snapshot, say so plainly \
+instead of guessing. Keep answers concise (a few sentences, or a short list for multi-item questions like \
+per-strategy breakdowns). Speak in first person as the bot ("I have 3 open trades...", "My win rate this \
+week is..."). This is a paper-trading account, not live money — if asked to place/close/change a trade, \
+explain that you only report status here and don't execute actions through chat."""
+
+
+@app.post("/chat")
+async def chat(request: Request):
+    if not _has_valid_session(request):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    message = (body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+    if len(message) > 2000:
+        message = message[:2000]
+
+    try:
+        snapshot = _build_chat_context()
+        from ai_brain import client as anthropic_client
+        response = anthropic_client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=500,
+            system=CHAT_SYSTEM_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"Current account snapshot (JSON):\n{snapshot}\n\nUser question: {message}",
+            }],
+        )
+        reply = response.content[0].text.strip()
+        return JSONResponse({"reply": reply})
+    except Exception as e:
+        log.error(f"/chat error: {e}")
+        return JSONResponse({"error": f"Chat failed: {str(e)[:200]}"}, status_code=500)
 
 
 # ── Admin: live-DB duplicate trade cleanup ──
@@ -478,105 +648,135 @@ async def admin_download_backup(request: Request, path: str):
 _STRATEGY_BREAKDOWN_TZ = ZoneInfo("America/New_York")
 
 
-@app.get("/admin/strategy-breakdown/{secret}")
-async def admin_strategy_breakdown(secret: str, days: int = 1):
+def _compute_strategy_breakdown(days: int | None = 1) -> dict:
     """
     Read-only per-strategy + per-symbol performance breakdown over the
     trailing `days` days (default 1 = today only, in America/New_York —
-    the same trading-day boundary /stats uses). Only CLOSED trades are
-    counted; open positions are excluded.
+    the same trading-day boundary /stats uses). Pass days=None for
+    all-time (no lower bound). Only CLOSED trades are counted; open
+    positions are excluded.
+
+    Also returns `by_strategy`: the same trades rolled up per strategy
+    only (summed across every symbol it trades), since "how is strategy X
+    doing overall" is a different question than "how is strategy X doing
+    on symbol Y" — the per-(strategy,symbol) `breakdown` list answers the
+    latter but silently fragments the former across N rows.
+
+    Shared by GET /admin/strategy-breakdown/{secret} (raw JSON, secret-gated)
+    and the /dashboard page (rendered server-side for an already-authenticated
+    session, so it never needs the admin secret client-side).
     """
+    db_path = os.getenv("DB_PATH", "trades.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    # Detect whether an R-multiple column exists on this DB before
+    # selecting it — schemas can drift between environments and this
+    # endpoint must not hard-fail if the column is absent.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)").fetchall()}
+    r_col = "rr" if "rr" in cols else None
+
+    select_cols = "strategy, symbol, result, pnl, exit_time"
+    if r_col:
+        select_cols += f", {r_col}"
+
+    rows = conn.execute(
+        f"SELECT {select_cols} FROM paper_trades "
+        f"WHERE status='CLOSED' AND exit_time IS NOT NULL"
+    ).fetchall()
+    conn.close()
+
+    now_local   = datetime.now(timezone.utc).astimezone(_STRATEGY_BREAKDOWN_TZ)
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    since       = None if days is None else today_start - timedelta(days=max(days, 1) - 1)
+
+    def _parse_exit_time(ts: str) -> datetime:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_STRATEGY_BREAKDOWN_TZ)
+
+    matched = rows if since is None else [r for r in rows if _parse_exit_time(r["exit_time"]) >= since]
+
+    groups = {}
+    strategy_groups = {}
+    for r in matched:
+        key = (r["strategy"] or "UNKNOWN", r["symbol"] or "UNKNOWN")
+        g = groups.setdefault(key, {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "r_values": []})
+        sg = strategy_groups.setdefault(r["strategy"] or "UNKNOWN", {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "r_values": []})
+        g["trades"] += 1
+        sg["trades"] += 1
+        if r["result"] == "WIN":
+            g["wins"] += 1
+            sg["wins"] += 1
+        elif r["result"] == "LOSS":
+            g["losses"] += 1
+            sg["losses"] += 1
+        g["net_pnl"] += r["pnl"] or 0
+        sg["net_pnl"] += r["pnl"] or 0
+        if r_col:
+            r_val = r[r_col]
+            if r_val is not None:
+                g["r_values"].append(r_val)
+                sg["r_values"].append(r_val)
+
+    def _build_entry(g: dict, strategy: str = None, symbol: str = None) -> dict:
+        trades = g["trades"]
+        entry = {}
+        if strategy is not None:
+            entry["strategy"] = strategy
+        if symbol is not None:
+            entry["symbol"] = symbol
+        entry.update({
+            "trades":    trades,
+            "wins":      g["wins"],
+            "losses":    g["losses"],
+            "win_rate":  round((g["wins"] / trades) * 100, 1) if trades else 0.0,
+            "net_pnl":   round(g["net_pnl"], 2),
+        })
+        if r_col:
+            entry["avg_r"] = round(sum(g["r_values"]) / len(g["r_values"]), 2) if g["r_values"] else None
+        return entry
+
+    breakdown = [
+        _build_entry(g, strategy=strategy, symbol=symbol)
+        for (strategy, symbol), g in groups.items()
+    ]
+    breakdown.sort(key=lambda e: e["net_pnl"])
+
+    by_strategy = [
+        _build_entry(sg, strategy=strategy)
+        for strategy, sg in strategy_groups.items()
+    ]
+    by_strategy.sort(key=lambda e: e["net_pnl"], reverse=True)
+
+    totals_group = {
+        "trades":   sum(g["trades"] for g in groups.values()),
+        "wins":     sum(g["wins"] for g in groups.values()),
+        "losses":   sum(g["losses"] for g in groups.values()),
+        "net_pnl":  sum(g["net_pnl"] for g in groups.values()),
+        "r_values": [v for g in groups.values() for v in g["r_values"]],
+    }
+    totals = _build_entry(totals_group)
+
+    return {
+        "days":        days,
+        "since":       since.isoformat() if since is not None else None,
+        "timezone":    "America/New_York",
+        "breakdown":   breakdown,
+        "by_strategy": by_strategy,
+        "totals":      totals,
+    }
+
+
+@app.get("/admin/strategy-breakdown/{secret}")
+async def admin_strategy_breakdown(secret: str, days: int = 1):
     if not ADMIN_SECRET or secret != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
-
     try:
-        db_path = os.getenv("DB_PATH", "trades.db")
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-
-        # Detect whether an R-multiple column exists on this DB before
-        # selecting it — schemas can drift between environments and this
-        # endpoint must not hard-fail if the column is absent.
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)").fetchall()}
-        r_col = "rr" if "rr" in cols else None
-
-        select_cols = "strategy, symbol, result, pnl, exit_time"
-        if r_col:
-            select_cols += f", {r_col}"
-
-        rows = conn.execute(
-            f"SELECT {select_cols} FROM paper_trades "
-            f"WHERE status='CLOSED' AND exit_time IS NOT NULL"
-        ).fetchall()
-        conn.close()
-
-        now_local   = datetime.now(timezone.utc).astimezone(_STRATEGY_BREAKDOWN_TZ)
-        today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        since       = today_start - timedelta(days=max(days, 1) - 1)
-
-        def _parse_exit_time(ts: str) -> datetime:
-            dt = datetime.fromisoformat(ts)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(_STRATEGY_BREAKDOWN_TZ)
-
-        matched = [r for r in rows if _parse_exit_time(r["exit_time"]) >= since]
-
-        groups = {}
-        for r in matched:
-            key = (r["strategy"] or "UNKNOWN", r["symbol"] or "UNKNOWN")
-            g = groups.setdefault(key, {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "r_values": []})
-            g["trades"] += 1
-            if r["result"] == "WIN":
-                g["wins"] += 1
-            elif r["result"] == "LOSS":
-                g["losses"] += 1
-            g["net_pnl"] += r["pnl"] or 0
-            if r_col:
-                r_val = r[r_col]
-                if r_val is not None:
-                    g["r_values"].append(r_val)
-
-        def _build_entry(g: dict, strategy: str = None, symbol: str = None) -> dict:
-            trades = g["trades"]
-            entry = {}
-            if strategy is not None:
-                entry["strategy"] = strategy
-            if symbol is not None:
-                entry["symbol"] = symbol
-            entry.update({
-                "trades":    trades,
-                "wins":      g["wins"],
-                "losses":    g["losses"],
-                "win_rate":  round((g["wins"] / trades) * 100, 1) if trades else 0.0,
-                "net_pnl":   round(g["net_pnl"], 2),
-            })
-            if r_col:
-                entry["avg_r"] = round(sum(g["r_values"]) / len(g["r_values"]), 2) if g["r_values"] else None
-            return entry
-
-        breakdown = [
-            _build_entry(g, strategy=strategy, symbol=symbol)
-            for (strategy, symbol), g in groups.items()
-        ]
-        breakdown.sort(key=lambda e: e["net_pnl"])
-
-        totals_group = {
-            "trades":   sum(g["trades"] for g in groups.values()),
-            "wins":     sum(g["wins"] for g in groups.values()),
-            "losses":   sum(g["losses"] for g in groups.values()),
-            "net_pnl":  sum(g["net_pnl"] for g in groups.values()),
-            "r_values": [v for g in groups.values() for v in g["r_values"]],
-        }
-        totals = _build_entry(totals_group)
-
-        return JSONResponse({
-            "days":       days,
-            "since":      since.isoformat(),
-            "timezone":   "America/New_York",
-            "breakdown":  breakdown,
-            "totals":     totals,
-        })
+        # days=0 (or any non-positive value) means "all time" — matches
+        # the ?days=0 convention used by the /dashboard "ALL" range link.
+        return JSONResponse(_compute_strategy_breakdown(days if days > 0 else None))
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -625,9 +825,11 @@ async def logout():
 
 
 @app.get("/dashboard", response_class=None)
-async def dashboard(request: Request):
+async def dashboard(request: Request, days: int = 7):
     if not _has_valid_session(request):
         return RedirectResponse(url="/login", status_code=303)
+    # days=0 means "all time" (see _compute_strategy_breakdown docstring).
+    breakdown_days = days if days > 0 else None
     ft          = FeeTracker()
     cb          = ft.get_circuit_breaker_status()
     ft.close()
@@ -677,17 +879,66 @@ async def dashboard(request: Request):
     win_bar_h  = round((t_wins / bar_max) * 100)
     loss_bar_h = round((t_losses / bar_max) * 100)
 
+    # Win/loss bars for Today / Week / Month / Year, side by side in that
+    # chronological (shortest-to-longest window) order.
+    performance = executor.get_performance_summary()
+
+    def _period_panel(period_label: str, wins: int, losses: int, net_pnl: float) -> str:
+        p_max    = max(wins, losses, 1)
+        w_h      = round((wins / p_max) * 100)
+        l_h      = round((losses / p_max) * 100)
+        total    = wins + losses
+        wr_str   = f"{round((wins / total) * 100)}%" if total > 0 else "---"
+        pnl_clr_ = "#FFD700" if net_pnl >= 0 else "#FF4757"
+        return f"""<div class="period-card">
+          <div class="period-card-label">{period_label}</div>
+          <div class="period-bars">
+            <div class="period-col">
+              <div class="period-bar-count" style="color:#9B30FF">{wins}</div>
+              <div class="period-bar" style="height:{w_h}%;background:#9B30FF;color:#9B30FF"></div>
+              <div class="period-bar-label">W</div>
+            </div>
+            <div class="period-col">
+              <div class="period-bar-count" style="color:#FF4757">{losses}</div>
+              <div class="period-bar" style="height:{l_h}%;background:#FF4757;color:#FF4757"></div>
+              <div class="period-bar-label">L</div>
+            </div>
+          </div>
+          <div class="period-card-foot">
+            <span>{wr_str} WR</span>
+            <span style="color:{pnl_clr_}">${net_pnl:+.2f}</span>
+          </div>
+        </div>"""
+
+    period_grid_html = (
+        _period_panel("TODAY", performance["today"]["wins"], performance["today"]["losses"], performance["today"]["net_pnl"])
+        + _period_panel("THIS WEEK", performance["this_week"]["wins"], performance["this_week"]["losses"], performance["this_week"]["net_pnl"])
+        + _period_panel("THIS MONTH", performance["this_month"]["wins"], performance["this_month"]["losses"], performance["this_month"]["net_pnl"])
+        + _period_panel("THIS YEAR", performance["this_year"]["wins"], performance["this_year"]["losses"], performance["this_year"]["net_pnl"])
+    )
+
     open_rows = ""
     for t in trades_open:
         d      = t["direction"].upper()
         d_clr  = "#9B30FF" if d in ("BUY","LONG") else "#FF4757"
         d_icon = "▲" if d in ("BUY","LONG") else "▼"
+        sl_val  = t.get("sl")
+        tp1_val = t.get("tp1")
+        tp2_val = t.get("tp2")
+        tp3_val = t.get("tp3")
+        sl_cell  = f'{sl_val}' if sl_val is not None else "—"
+        tp_cell  = (
+            f'{tp1_val} / {tp2_val} / {tp3_val}'
+            if tp1_val is not None else "—"
+        )
         open_rows += f"""<tr>
           <td class="mono accent">{t['trade_id']}</td>
           <td class="mono">{t['symbol']}</td>
           <td class="mono" style="color:{d_clr}">{d_icon} {d}</td>
           <td class="mono dim">{t['strategy'].replace('_',' ').upper()}</td>
           <td class="mono">{t['entry_price']}</td>
+          <td class="mono" style="color:#FF4757">{sl_cell}</td>
+          <td class="mono" style="color:#9B30FF">{tp_cell}</td>
           <td class="mono" style="color:#FFD700">{t['score']:.1f}</td>
           <td class="mono dim">{t['entry_time'][:16].replace('T',' ')}</td>
         </tr>"""
@@ -697,6 +948,86 @@ async def dashboard(request: Request):
         bc = "#9B30FF" if b=="BULL" else "#FF4757" if b=="BEAR" else "#4A2060"
         sym_bias_html += f'<div class="sym-node"><span class="sym-name">{sym}</span><span class="sym-val" style="color:{bc}">{b}</span></div>'
 
+    # Strategy breakdown (range selectable via ?days=, America/New_York) —
+    # same read-only query that powers GET /admin/strategy-breakdown/{secret},
+    # rendered here server-side so the dashboard never has to expose
+    # ADMIN_SECRET client-side.
+    range_label = {1: "TODAY", 7: "7D", 30: "30D"}.get(days, "ALL" if breakdown_days is None else f"{days}D")
+    range_links = ""
+    for lbl, d in (("1D", 1), ("7D", 7), ("30D", 30), ("ALL", 0)):
+        active = "accent" if d == days else "dim"
+        range_links += f'<a href="/dashboard?days={d}" class="mono {active}" style="margin-right:14px;text-decoration:none">{lbl}</a>'
+
+    def _render_breakdown_table(rows_data: list, headers: list, row_builder, totals: dict, no_data_label: str) -> str:
+        if not rows_data:
+            return f'<div style="color:var(--dim);font-size:.73rem;letter-spacing:2px;padding:16px 0;font-family:Share Tech Mono,monospace">{no_data_label}</div>'
+        body_rows = "".join(row_builder(e) for e in rows_data)
+        head_html = "".join(f"<th>{h}</th>" for h in headers)
+        t_pnl_c = "#FFD700" if totals["net_pnl"] >= 0 else "#FF4757"
+        avg_r_total = totals.get("avg_r")
+        avg_r_cell = f'{avg_r_total}' if avg_r_total is not None else "—"
+        colspan = 2 if "SYMBOL" in headers else 1
+        return (
+            '<div class="table-wrap"><table>'
+            f'<thead><tr>{head_html}</tr></thead>'
+            f'<tbody>{body_rows}'
+            f'<tr style="border-top:2px solid var(--border)"><td class="mono accent" colspan="{colspan}">TOTAL</td>'
+            f'<td class="mono">{totals["trades"]}</td><td class="mono" style="color:#9B30FF">{totals["wins"]}</td>'
+            f'<td class="mono" style="color:#FF4757">{totals["losses"]}</td><td class="mono">{totals["win_rate"]}%</td>'
+            f'<td class="mono" style="color:{t_pnl_c}">${totals["net_pnl"]:+.2f}</td>'
+            f'<td class="mono dim">{avg_r_cell}</td></tr>'
+            '</tbody></table></div>'
+        )
+
+    try:
+        breakdown_data = _compute_strategy_breakdown(days=breakdown_days)
+
+        def _per_symbol_row(e: dict) -> str:
+            pnl_c = "#FFD700" if e["net_pnl"] >= 0 else "#FF4757"
+            avg_r_cell = f'{e["avg_r"]}' if "avg_r" in e and e["avg_r"] is not None else "—"
+            return f"""<tr>
+              <td class="mono dim">{e['strategy'].replace('_',' ').upper()}</td>
+              <td class="mono">{e['symbol']}</td>
+              <td class="mono">{e['trades']}</td>
+              <td class="mono" style="color:#9B30FF">{e['wins']}</td>
+              <td class="mono" style="color:#FF4757">{e['losses']}</td>
+              <td class="mono">{e['win_rate']}%</td>
+              <td class="mono" style="color:{pnl_c}">${e['net_pnl']:+.2f}</td>
+              <td class="mono dim">{avg_r_cell}</td>
+            </tr>"""
+
+        def _per_strategy_row(e: dict) -> str:
+            pnl_c = "#FFD700" if e["net_pnl"] >= 0 else "#FF4757"
+            avg_r_cell = f'{e["avg_r"]}' if "avg_r" in e and e["avg_r"] is not None else "—"
+            return f"""<tr>
+              <td class="mono dim">{e['strategy'].replace('_',' ').upper()}</td>
+              <td class="mono">{e['trades']}</td>
+              <td class="mono" style="color:#9B30FF">{e['wins']}</td>
+              <td class="mono" style="color:#FF4757">{e['losses']}</td>
+              <td class="mono">{e['win_rate']}%</td>
+              <td class="mono" style="color:{pnl_c}">${e['net_pnl']:+.2f}</td>
+              <td class="mono dim">{avg_r_cell}</td>
+            </tr>"""
+
+        breakdown_html = _render_breakdown_table(
+            breakdown_data["breakdown"],
+            ["STRATEGY", "SYMBOL", "TRADES", "W", "L", "WIN%", "NET P&amp;L", "AVG R"],
+            _per_symbol_row,
+            breakdown_data["totals"],
+            f"NO CLOSED TRADES ({range_label})",
+        )
+        by_strategy_html = _render_breakdown_table(
+            breakdown_data["by_strategy"],
+            ["STRATEGY", "TRADES", "W", "L", "WIN%", "NET P&amp;L", "AVG R"],
+            _per_strategy_row,
+            breakdown_data["totals"],
+            f"NO CLOSED TRADES ({range_label})",
+        )
+    except Exception as e:
+        err_html = f'<div style="color:var(--red);font-size:.73rem;letter-spacing:1px;padding:16px 0;font-family:Share Tech Mono,monospace">STRATEGY BREAKDOWN UNAVAILABLE: {str(e)[:80]}</div>'
+        breakdown_html = err_html
+        by_strategy_html = err_html
+
     now_str = datetime.utcnow().strftime("%Y.%m.%d  %H:%M:%S UTC")
 
     # Pre-compute conditional HTML blocks (can't use backslash escapes inside f-string {})
@@ -705,7 +1036,7 @@ async def dashboard(request: Request):
     else:
         positions_html = (
             '<div class="table-wrap"><table>'
-            '<thead><tr><th>ID</th><th>SYMBOL</th><th>DIRECTION</th><th>STRATEGY</th><th>ENTRY</th><th>SCORE</th><th>OPENED</th></tr></thead>'
+            '<thead><tr><th>ID</th><th>SYMBOL</th><th>DIRECTION</th><th>STRATEGY</th><th>ENTRY</th><th>SL</th><th>TP1/TP2/TP3</th><th>SCORE</th><th>OPENED</th></tr></thead>'
             f'<tbody>{open_rows}</tbody>'
             '</table></div>'
         )
@@ -881,6 +1212,38 @@ header::after {{
 .chart-side-label {{ font-size:.6rem; letter-spacing:2px; color:var(--dim); font-family:'Share Tech Mono',monospace; }}
 .chart-side-val {{ font-family:'Orbitron',monospace; font-size:1.05rem; font-weight:700; }}
 
+/* WIN/LOSS BY PERIOD (Today / Week / Month / Year, side by side) */
+.period-grid {{
+  display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:32px;
+}}
+.period-card {{
+  background:var(--bg2); border:1px solid var(--borderb); padding:16px;
+  display:flex; flex-direction:column; align-items:center;
+}}
+.period-card-label {{
+  font-family:'Share Tech Mono',monospace; font-size:.63rem; letter-spacing:2px;
+  color:var(--dim); margin-bottom:12px;
+}}
+.period-bars {{ display:flex; align-items:flex-end; gap:16px; height:90px; }}
+.period-col {{ display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; width:36px; }}
+.period-bar {{
+  width:100%; border-radius:2px 2px 0 0; min-height:3px;
+  box-shadow:0 0 12px currentColor; transition:height .5s ease;
+}}
+.period-bar-count {{
+  font-family:'Orbitron',monospace; font-weight:900; font-size:.85rem;
+  margin-bottom:6px; text-shadow:0 0 8px currentColor;
+}}
+.period-bar-label {{
+  font-family:'Share Tech Mono',monospace; font-size:.58rem; letter-spacing:2px;
+  color:var(--dim); margin-top:8px;
+}}
+.period-card-foot {{
+  display:flex; justify-content:space-between; width:100%; margin-top:14px;
+  padding-top:10px; border-top:1px solid var(--border);
+  font-family:'Orbitron',monospace; font-size:.72rem; font-weight:700; color:var(--text);
+}}
+
 /* SYMBOL BIAS */
 .sym-row {{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:32px; }}
 .sym-node {{
@@ -990,9 +1353,38 @@ footer::before {{
 @media (max-width:700px) {{
   .agent-map {{ grid-template-columns:repeat(2,1fr); }}
   .grid {{ grid-template-columns:repeat(2,1fr); }}
+  .period-grid {{ grid-template-columns:repeat(2,1fr); }}
   .logo-title {{ font-size:1rem; letter-spacing:3px; }}
   .countdown-num {{ font-size:1.8rem; }}
 }}
+
+/* CHAT */
+.chat-wrap {{
+  background:var(--bg2); border:1px solid var(--borderb); border-left:3px solid var(--purple);
+  padding:18px 20px; margin-bottom:32px;
+  clip-path:polygon(0 0,calc(100% - 16px) 0,100% 16px,100% 100%,0 100%); position:relative;
+}}
+.chat-log {{
+  height:260px; overflow-y:auto; margin-bottom:12px; padding-right:6px;
+  font-family:'Share Tech Mono',monospace; font-size:.78rem; line-height:1.6;
+}}
+.chat-msg {{ margin-bottom:10px; }}
+.chat-msg .who {{ letter-spacing:2px; font-size:.65rem; opacity:.75; display:block; }}
+.chat-msg.user .who {{ color:var(--gold); }}
+.chat-msg.bot .who {{ color:var(--purple2); }}
+.chat-msg .body {{ color:#e8e0f5; white-space:pre-wrap; }}
+.chat-input-row {{ display:flex; gap:10px; }}
+.chat-input-row input {{
+  flex:1; background:var(--bg3); border:1px solid var(--border); color:#fff;
+  font-family:'Share Tech Mono',monospace; font-size:.8rem; padding:10px 12px; outline:none;
+}}
+.chat-input-row input:focus {{ border-color:var(--purple); }}
+.chat-input-row button {{
+  background:var(--purple); border:none; color:#fff; font-family:'Orbitron',monospace;
+  font-size:.7rem; letter-spacing:2px; padding:0 20px; cursor:pointer;
+}}
+.chat-input-row button:disabled {{ opacity:.5; cursor:default; }}
+.chat-hint {{ color:var(--dim); font-size:.6rem; letter-spacing:1px; margin-top:8px; }}
 </style>
 </head>
 <body>
@@ -1095,6 +1487,65 @@ footer::before {{
   <div class="margin-meter-label mono dim">MARGIN UTILIZATION — {margin_pct:.1f}%</div>
 </div>
 
+<!-- TODAY'S PERFORMANCE -->
+<div class="section-label">TODAY'S WIN / LOSS</div>
+<div class="chart-wrap">
+  <div class="chart-bars">
+    <div class="chart-col">
+      <div class="chart-bar-count" style="color:#9B30FF">{t_wins}</div>
+      <div class="chart-bar" style="height:{win_bar_h}%;background:#9B30FF;color:#9B30FF"></div>
+      <div class="chart-bar-label">WINS</div>
+    </div>
+    <div class="chart-col">
+      <div class="chart-bar-count" style="color:#FF4757">{t_losses}</div>
+      <div class="chart-bar" style="height:{loss_bar_h}%;background:#FF4757;color:#FF4757"></div>
+      <div class="chart-bar-label">LOSSES</div>
+    </div>
+  </div>
+  <div class="chart-side">
+    <div><div class="chart-side-label">TRADES TODAY</div><div class="chart-side-val" style="color:var(--text)">{t_total}</div></div>
+    <div><div class="chart-side-label">BREAKEVEN</div><div class="chart-side-val" style="color:var(--dim)">{t_be}</div></div>
+    <div><div class="chart-side-label">WIN RATE</div><div class="chart-side-val glow-gold" style="color:var(--gold)">{t_win_rate_str}</div></div>
+    <div><div class="chart-side-label">TODAY P&amp;L</div><div class="chart-side-val" style="color:{t_pnl_clr}">${t_pnl:+.2f}</div></div>
+  </div>
+</div>
+
+<!-- WIN/LOSS BY PERIOD -->
+<div class="section-label">WIN / LOSS BY PERIOD</div>
+<div class="period-grid">
+{period_grid_html}
+</div>
+
+<!-- OPEN POSITIONS -->
+<div class="section-label">OPEN POSITIONS</div>
+{positions_html}
+
+<!-- SYMBOL INTELLIGENCE -->
+<div class="section-label">SYMBOL INTELLIGENCE</div>
+<div class="sym-row">
+{sym_bias_html if sym_bias_html else '<span style="color:var(--dim);font-size:.73rem;font-family:Share Tech Mono,monospace;letter-spacing:2px">AWAITING REGIME CLASSIFICATION...</span>'}
+</div>
+
+<!-- STRATEGY BREAKDOWN -->
+<div class="section-label">STRATEGY PERFORMANCE ({range_label}) &nbsp; {range_links}</div>
+<div style="margin-bottom:6px;color:var(--dim);font-size:.68rem;letter-spacing:1px;font-family:Share Tech Mono,monospace">BY STRATEGY (ALL SYMBOLS COMBINED)</div>
+{by_strategy_html}
+<div style="margin:14px 0 6px;color:var(--dim);font-size:.68rem;letter-spacing:1px;font-family:Share Tech Mono,monospace">BY STRATEGY + SYMBOL</div>
+{breakdown_html}
+
+<!-- CHAT -->
+<div class="section-label">ASK HAYDEN</div>
+<div class="chat-wrap">
+  <div class="chat-log" id="chat-log">
+    <div class="chat-msg bot"><span class="who">HAYDEN</span><span class="body">Ask me about open trades, strategy performance, margin, or today's P&amp;L.</span></div>
+  </div>
+  <div class="chat-input-row">
+    <input type="text" id="chat-input" placeholder="e.g. how is ict_5step doing this week?" autocomplete="off">
+    <button id="chat-send">SEND</button>
+  </div>
+  <div class="chat-hint">Answers are generated live from the current account/trade data.</div>
+</div>
+
 <!-- AGENT MAP -->
 <div class="section-label">ACTIVE AGENTS</div>
 <div class="agent-map">
@@ -1130,7 +1581,7 @@ footer::before {{
     <div class="agent-ping"></div>
     <div class="agent-icon">⊞</div>
     <div class="agent-name">SCANNER</div>
-    <div class="agent-status">16 STRATEGIES<br>8 MARKETS</div>
+    <div class="agent-status">6 STRATEGIES<br>8 MARKETS</div>
     <div class="agent-freq">↻ 5 MIN</div>
   </div>
   <div class="agent-node">
@@ -1138,7 +1589,7 @@ footer::before {{
     <div class="agent-icon">∿</div>
     <div class="agent-name">CALIBRATE</div>
     <div class="agent-status">SELF-LEARNING<br>WEIGHT ADJ</div>
-    <div class="agent-freq">↻ 25 TRADES</div>
+    <div class="agent-freq">↻ 10 TRADES</div>
   </div>
   <div class="agent-node">
     <div class="agent-ping"></div>
@@ -1154,39 +1605,6 @@ footer::before {{
     <div class="agent-freq">OFFLINE</div>
   </div>
 </div>
-
-<!-- SYMBOL INTELLIGENCE -->
-<div class="section-label">SYMBOL INTELLIGENCE</div>
-<div class="sym-row">
-{sym_bias_html if sym_bias_html else '<span style="color:var(--dim);font-size:.73rem;font-family:Share Tech Mono,monospace;letter-spacing:2px">AWAITING REGIME CLASSIFICATION...</span>'}
-</div>
-
-<!-- TODAY'S PERFORMANCE -->
-<div class="section-label">TODAY'S WIN / LOSS</div>
-<div class="chart-wrap">
-  <div class="chart-bars">
-    <div class="chart-col">
-      <div class="chart-bar-count" style="color:#9B30FF">{t_wins}</div>
-      <div class="chart-bar" style="height:{win_bar_h}%;background:#9B30FF;color:#9B30FF"></div>
-      <div class="chart-bar-label">WINS</div>
-    </div>
-    <div class="chart-col">
-      <div class="chart-bar-count" style="color:#FF4757">{t_losses}</div>
-      <div class="chart-bar" style="height:{loss_bar_h}%;background:#FF4757;color:#FF4757"></div>
-      <div class="chart-bar-label">LOSSES</div>
-    </div>
-  </div>
-  <div class="chart-side">
-    <div><div class="chart-side-label">TRADES TODAY</div><div class="chart-side-val" style="color:var(--text)">{t_total}</div></div>
-    <div><div class="chart-side-label">BREAKEVEN</div><div class="chart-side-val" style="color:var(--dim)">{t_be}</div></div>
-    <div><div class="chart-side-label">WIN RATE</div><div class="chart-side-val glow-gold" style="color:var(--gold)">{t_win_rate_str}</div></div>
-    <div><div class="chart-side-label">TODAY P&amp;L</div><div class="chart-side-val" style="color:{t_pnl_clr}">${t_pnl:+.2f}</div></div>
-  </div>
-</div>
-
-<!-- OPEN POSITIONS -->
-<div class="section-label">OPEN POSITIONS</div>
-{positions_html}
 
 {countdown_html}
 
@@ -1394,6 +1812,51 @@ function animate(t) {{
   requestAnimationFrame(animate);
 }}
 requestAnimationFrame(animate);
+
+// ── CHAT ──
+(function() {{
+  var log_   = document.getElementById('chat-log');
+  var input  = document.getElementById('chat-input');
+  var send   = document.getElementById('chat-send');
+
+  function addMsg(who, text, cls) {{
+    var div = document.createElement('div');
+    div.className = 'chat-msg ' + cls;
+    var whoSpan = document.createElement('span');
+    whoSpan.className = 'who'; whoSpan.textContent = who;
+    var bodySpan = document.createElement('span');
+    bodySpan.className = 'body'; bodySpan.textContent = text;
+    div.appendChild(whoSpan); div.appendChild(bodySpan);
+    log_.appendChild(div);
+    log_.scrollTop = log_.scrollHeight;
+  }}
+
+  async function sendMsg() {{
+    var text = input.value.trim();
+    if (!text) return;
+    addMsg('YOU', text, 'user');
+    input.value = '';
+    input.disabled = true; send.disabled = true;
+    addMsg('HAYDEN', '...', 'bot');
+    var thinking = log_.lastChild;
+    try {{
+      var res = await fetch('/chat', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ message: text }})
+      }});
+      var data = await res.json();
+      thinking.querySelector('.body').textContent = data.reply || data.error || 'No response.';
+    }} catch (e) {{
+      thinking.querySelector('.body').textContent = 'Chat request failed: ' + e;
+    }} finally {{
+      input.disabled = false; send.disabled = false; input.focus();
+    }}
+  }}
+
+  send.addEventListener('click', sendMsg);
+  input.addEventListener('keydown', function(e) {{ if (e.key === 'Enter') sendMsg(); }});
+}})();
 </script>
 
 </body>

@@ -10,6 +10,8 @@ import sqlite3
 import logging
 from datetime import datetime, timezone
 
+from weight_adjuster import load_weights as _load_strategy_weights, save_weights as _save_strategy_weights
+
 log = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("DB_PATH", "trades.db")
@@ -23,12 +25,12 @@ REENABLE_ABOVE = float(os.getenv("STRATEGY_REENABLE_WR", "0.50"))  # re-enable i
 
 ALL_STRATEGIES = [
     "sweep_bos_fvg", "rp_profits", "ict_5step", "orb_scalp",
-    "supply_demand", "mamba_scalp", "turtle_soup", "silver_bullet",
-    "judas_swing", "engulfing", "pin_bar", "inside_bar",
-    "morning_star", "vwap_reclaim", "ema_cross", "rsi_divergence",
+    "supply_demand", "mamba_scalp",
 ]
 
-ALL_MARKETS = ["XAUUSD", "ES", "NQ", "CL"]
+# Every symbol the bot trades — previously futures-only, so forex
+# strategy/symbol combos were never evaluated by auto-management at all.
+ALL_MARKETS = ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]
 
 
 class StrategyManager:
@@ -94,6 +96,18 @@ class StrategyManager:
              datetime.now(timezone.utc).isoformat() if not enabled else None, reason),
         )
         self.conn.commit()
+
+        # This table alone was never actually consulted by the scanner —
+        # only self_learning.is_strategy_enabled() (which reads
+        # strategy_weights.json) gates live signals. Mirror the decision
+        # into that file so an auto-disable here actually stops the strategy
+        # from firing, not just from showing as disabled in the briefing.
+        try:
+            weights = _load_strategy_weights()
+            weights[key] = 0.0 if not enabled else max(weights.get(key, 1.0), 1.0)
+            _save_strategy_weights(weights)
+        except Exception as e:
+            log.error(f"Failed to sync {key} enabled={enabled} to strategy_weights.json: {e}")
 
     def run_auto_management(self) -> dict:
         """

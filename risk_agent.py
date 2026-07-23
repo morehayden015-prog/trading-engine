@@ -15,10 +15,14 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 
 from agent_context import context
+from paper_executor import get_current_equity
 
 log = logging.getLogger(__name__)
 
 DB_PATH      = os.getenv("DB_PATH", "trades.db")
+# Starting balance fallback only — calc_dynamic_sizing() below takes the
+# actual current equity as a parameter so drawdown % scales with the real
+# account value, not a fixed day-one number.
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "10000"))
 
 # Correlated market groups — being long/short in same group = correlated risk
@@ -109,16 +113,23 @@ def calc_dynamic_sizing(
     consecutive:  int,
     vix_mult:     float,
     regime:       str,
+    equity:       float = None,
 ) -> float:
     """
     Calculate position sizing multiplier based on current risk state.
     Base = 1.0. Range = 0.25–1.5.
+
+    `equity` is the account's current value (starting balance + realized
+    P&L) — drawdown % must be measured against that, not the fixed starting
+    balance, or a $200 loss looks twice as scary after the account has
+    compounded to $20k as it did on day one.
     """
     mult = 1.0
+    equity = equity if equity else ACCOUNT_SIZE
 
     # Drawdown scaling
-    daily_pct  = daily_pnl  / ACCOUNT_SIZE * 100
-    weekly_pct = weekly_pnl / ACCOUNT_SIZE * 100
+    daily_pct  = daily_pnl  / equity * 100
+    weekly_pct = weekly_pnl / equity * 100
 
     if daily_pct < -2.0:
         mult *= 0.5     # down >2% today — halve size
@@ -164,13 +175,20 @@ async def risk_agent_loop():
             weekly_pnl   = _get_pnl(days=7)
             consecutive  = _get_consecutive_losses()
             open_pos     = _get_open_positions()
-            vix_mult     = context.get("sizing_multiplier", 1.0)
+            # Read intel_agent's raw VIX/fear-greed multiplier, NOT this
+            # agent's own prior output — previously both read/wrote
+            # "sizing_multiplier", so risk_agent was compounding its own
+            # result on every 60s tick instead of applying intel_agent's
+            # actual (15-min) VIX signal.
+            vix_mult     = context.get("vix_sizing_multiplier", 1.0)
             regime       = context.get("regime", "UNKNOWN")
+            equity       = get_current_equity(DB_PATH)
 
             sizing = calc_dynamic_sizing(
                 daily_pnl=daily_pnl,
                 weekly_pnl=weekly_pnl,
                 consecutive=consecutive,
+                equity=equity,
                 vix_mult=vix_mult,
                 regime=regime,
             )

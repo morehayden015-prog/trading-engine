@@ -26,7 +26,6 @@ def load_weights():
     # Default weights — all strategies start at 1.0
     print(f"[ADJUSTER] No weights file found — creating defaults")
     defaults = {
-        # Original 6 strategies
         "sweep_bos_fvg::XAUUSD": 1.0,
         "rp_profits::ES": 1.0,
         "rp_profits::NQ": 1.0,
@@ -43,41 +42,6 @@ def load_weights():
         "supply_demand::CL": 1.0,
         "mamba_scalp::NQ": 1.0,
         "mamba_scalp::ES": 1.0,
-        # New strategies
-        "turtle_soup::XAUUSD": 1.0,
-        "turtle_soup::ES": 1.0,
-        "turtle_soup::NQ": 1.0,
-        "silver_bullet::XAUUSD": 1.0,
-        "silver_bullet::NQ": 1.0,
-        "silver_bullet::ES": 1.0,
-        "judas_swing::XAUUSD": 1.0,
-        "judas_swing::NQ": 1.0,
-        "judas_swing::ES": 1.0,
-        "engulfing::XAUUSD": 1.0,
-        "engulfing::ES": 1.0,
-        "engulfing::NQ": 1.0,
-        "engulfing::CL": 1.0,
-        "pin_bar::XAUUSD": 1.0,
-        "pin_bar::ES": 1.0,
-        "pin_bar::NQ": 1.0,
-        "pin_bar::CL": 1.0,
-        "inside_bar::XAUUSD": 1.0,
-        "inside_bar::ES": 1.0,
-        "inside_bar::NQ": 1.0,
-        "inside_bar::CL": 1.0,
-        "morning_star::XAUUSD": 1.0,
-        "morning_star::ES": 1.0,
-        "morning_star::NQ": 1.0,
-        "vwap_reclaim::ES": 1.0,
-        "vwap_reclaim::NQ": 1.0,
-        "vwap_reclaim::CL": 1.0,
-        "ema_cross::XAUUSD": 1.0,
-        "ema_cross::ES": 1.0,
-        "ema_cross::NQ": 1.0,
-        "ema_cross::CL": 1.0,
-        "rsi_divergence::XAUUSD": 1.0,
-        "rsi_divergence::ES": 1.0,
-        "rsi_divergence::NQ": 1.0,
     }
     save_weights(defaults)
     return defaults

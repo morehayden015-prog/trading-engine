@@ -10,7 +10,7 @@ TradingView webhooks are.
 
 Markets scanned: XAUUSD, ES, NQ, CL, EURUSD, GBPUSD, USDJPY, AUDUSD
 Timeframes:      5m (entry), 15m (structure), 1h (bias)
-Strategies:      16 total (6 original + 10 new)
+Strategies:      6 total
 
 Run standalone:  python scanner.py
 Or imported:     from scanner import start_scanner (called by main.py)
@@ -61,16 +61,6 @@ STRATEGY_MARKETS = {
     "orb_scalp":       ["ES", "NQ", "CL"],
     "supply_demand":   ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
     "mamba_scalp":     ["NQ", "ES"],
-    "turtle_soup":     ["XAUUSD", "ES", "NQ", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
-    "silver_bullet":   ["XAUUSD", "NQ", "ES", "EURUSD", "GBPUSD"],
-    "judas_swing":     ["XAUUSD", "NQ", "ES", "EURUSD", "GBPUSD", "AUDUSD"],
-    "engulfing":       ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
-    "pin_bar":         ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
-    "inside_bar":      ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
-    "morning_star":    ["XAUUSD", "ES", "NQ", "EURUSD", "GBPUSD"],
-    "vwap_reclaim":    ["ES", "NQ", "CL"],
-    "ema_cross":       ["XAUUSD", "ES", "NQ", "CL", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
-    "rsi_divergence":  ["XAUUSD", "ES", "NQ", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD"],
 }
 
 # ── Data fetcher ──────────────────────────────────────────────────────────────
@@ -256,147 +246,6 @@ def detect_rp_profits(df5, df15, df1h):
         return "sell", f"rp_profits: untested session high {session_h:.2f} reversal"
     return None, ""
 
-def detect_turtle_soup(df5, df15, df1h):
-    if len(df5) < 30:
-        return None, ""
-    c = df5.iloc[-1]; c1 = df5.iloc[-2]; atr_ = atr(df5).iloc[-1]
-    prior = df5.iloc[-25:-3]; prior_high = prior["high"].max(); prior_low = prior["low"].min()
-    bear = c1["high"] > prior_high and c1["close"] < prior_high and c["close"] < c["open"] and (c1["high"] - prior_high) < atr_ * 0.5
-    bull = c1["low"] < prior_low and c1["close"] > prior_low and c["close"] > c["open"] and (prior_low - c1["low"]) < atr_ * 0.5
-    if bull:  return "buy",  f"turtle_soup: false break below {prior_low:.2f}"
-    if bear:  return "sell", f"turtle_soup: false break above {prior_high:.2f}"
-    return None, ""
-
-def detect_silver_bullet(df5, df15, df1h):
-    hour = datetime.now(timezone.utc).hour; minute = datetime.now(timezone.utc).minute
-    t = hour * 60 + minute
-    if not ((3*60 <= t <= 4*60) or (15*60 <= t <= 16*60)) or len(df5) < 20:
-        return None, ""
-    c = df5.iloc[-1]; c1 = df5.iloc[-2]; c2 = df5.iloc[-3]
-    bull_fvg_top = c2["high"]; bull_fvg_bot = c["low"]
-    in_bull_fvg = c2["high"] < c1["low"] and bull_fvg_bot <= c["close"] <= bull_fvg_top
-    bear_fvg_top = c["high"]; bear_fvg_bot = c2["low"]
-    in_bear_fvg = c2["low"] > c1["high"] and bear_fvg_bot <= c["close"] <= bear_fvg_top
-    if in_bull_fvg and c["close"] > c["open"]:  return "buy",  "silver_bullet: FVG fill entry during silver bullet window"
-    if in_bear_fvg and c["close"] < c["open"]:  return "sell", "silver_bullet: bearish FVG fill during silver bullet window"
-    return None, ""
-
-def detect_judas_swing(df5, df15, df1h):
-    hour = datetime.now(timezone.utc).hour
-    if not (3 <= hour <= 8) or len(df5) < 40 or len(df15) < 10:
-        return None, ""
-    london_bars = df5.tail(30); session_high = london_bars["high"].max(); session_low = london_bars["low"].min()
-    c = df5.iloc[-1]; atr_ = atr(df5).iloc[-1]
-    high_early  = df5.iloc[-25:-15]["high"].max(); late_decline = df5.iloc[-10:]["close"].iloc[-1] < df5.iloc[-10:]["close"].iloc[0]
-    low_early   = df5.iloc[-25:-15]["low"].min();  late_rally   = df5.iloc[-10:]["close"].iloc[-1] > df5.iloc[-10:]["close"].iloc[0]
-    if high_early > session_low + (session_high - session_low) * 0.7 and late_decline and c["close"] < c["open"] and (c["open"] - c["close"]) > atr_ * 0.4:
-        return "sell", "judas_swing: early London high swept, reversing south"
-    if low_early < session_high - (session_high - session_low) * 0.7 and late_rally and c["close"] > c["open"] and (c["close"] - c["open"]) > atr_ * 0.4:
-        return "buy",  "judas_swing: early London low swept, reversing north"
-    return None, ""
-
-def detect_engulfing(df5, df15, df1h):
-    if len(df5) < 20:
-        return None, ""
-    c = df5.iloc[-1]; c1 = df5.iloc[-2]; e21 = ema(df5["close"], 21).iloc[-1]
-    sh, sl = swing_highs_lows(df5, lookback=15); atr_ = atr(df5).iloc[-1]
-    bull_engulf = c["close"] > c["open"] and c["open"] < c1["close"] and c["close"] > c1["open"] and (c["close"] - c["open"]) > (c1["open"] - c1["close"]) * 0.9
-    bear_engulf = c["close"] < c["open"] and c["open"] > c1["close"] and c["close"] < c1["open"] and (c["open"] - c["close"]) > (c1["close"] - c1["open"]) * 0.9
-    near_sl = abs(c["low"] - sl) < atr_ * 0.5; near_sh = abs(c["high"] - sh) < atr_ * 0.5; near_ema = abs(c["close"] - e21) < atr_ * 0.3
-    if bull_engulf and (near_sl or near_ema):  return "buy",  f"engulfing: bullish engulf at key level"
-    if bear_engulf and (near_sh or near_ema):  return "sell", f"engulfing: bearish engulf at key level"
-    return None, ""
-
-def detect_pin_bar(df5, df15, df1h):
-    if len(df15) < 20:
-        return None, ""
-    c = df15.iloc[-1]; atr_ = atr(df15).iloc[-1]; sh, sl = swing_highs_lows(df15, lookback=20)
-    body = abs(c["close"] - c["open"]); upper_wick = c["high"] - max(c["open"], c["close"]); lower_wick = min(c["open"], c["close"]) - c["low"]
-    total_range = c["high"] - c["low"]
-    has_long_lower = lower_wick > body * 2 and lower_wick > upper_wick * 2
-    has_long_upper = upper_wick > body * 2 and upper_wick > lower_wick * 2
-    significant = total_range > atr_ * 0.5
-    near_sl = abs(c["low"] - sl) < atr_ * 0.6; near_sh = abs(c["high"] - sh) < atr_ * 0.6
-    if has_long_lower and near_sl and significant:  return "buy",  f"pin_bar: hammer at support {sl:.2f}"
-    if has_long_upper and near_sh and significant:  return "sell", f"pin_bar: shooting star at resistance {sh:.2f}"
-    return None, ""
-
-def detect_inside_bar(df5, df15, df1h):
-    if len(df15) < 20:
-        return None, ""
-    c = df15.iloc[-1]; c1 = df15.iloc[-2]; c2 = df15.iloc[-3]
-    is_inside = c1["high"] <= c2["high"] and c1["low"] >= c2["low"]
-    if not is_inside:
-        return None, ""
-    bull_break = c["close"] > c2["high"] and c["close"] > c["open"]
-    bear_break = c["close"] < c2["low"]  and c["close"] < c["open"]
-    e50_1h = ema(df1h["close"], 50).iloc[-1] if len(df1h) > 50 else None
-    trend_bull = df1h["close"].iloc[-1] > e50_1h if e50_1h else True
-    trend_bear = df1h["close"].iloc[-1] < e50_1h if e50_1h else True
-    if bull_break and trend_bull:  return "buy",  f"inside_bar: IB breakout above {c2['high']:.2f}"
-    if bear_break and trend_bear:  return "sell", f"inside_bar: IB breakdown below {c2['low']:.2f}"
-    return None, ""
-
-def detect_morning_star(df5, df15, df1h):
-    if len(df15) < 20:
-        return None, ""
-    c = df15.iloc[-1]; c1 = df15.iloc[-2]; c2 = df15.iloc[-3]; atr_ = atr(df15).iloc[-1]
-    sh, sl = swing_highs_lows(df15, lookback=15)
-    first_bear = c2["close"] < c2["open"] and (c2["open"] - c2["close"]) > atr_ * 0.5
-    star_small = abs(c1["close"] - c1["open"]) < atr_ * 0.25
-    confirm_bull = c["close"] > c["open"] and (c["close"] - c["open"]) > atr_ * 0.4
-    at_support = c2["low"] <= sl + atr_ * 0.5
-    first_bull = c2["close"] > c2["open"] and (c2["close"] - c2["open"]) > atr_ * 0.5
-    confirm_bear = c["close"] < c["open"] and (c["open"] - c["close"]) > atr_ * 0.4
-    at_resist = c2["high"] >= sh - atr_ * 0.5
-    if first_bear and star_small and confirm_bull and at_support:  return "buy",  f"morning_star: reversal at support {sl:.2f}"
-    if first_bull and star_small and confirm_bear and at_resist:   return "sell", f"evening_star: reversal at resistance {sh:.2f}"
-    return None, ""
-
-def detect_vwap_reclaim(df5, df15, df1h):
-    mins_open = market_open_minutes()
-    if mins_open < 0 or mins_open > 360 or len(df5) < 40:
-        return None, ""
-    try:
-        vwap_series = vwap(df5)
-    except Exception:
-        return None, ""
-    c = df5.iloc[-1]; c1 = df5.iloc[-2]; v = vwap_series.iloc[-1]; v1 = vwap_series.iloc[-2]
-    avg_vol = df5["volume"].tail(20).mean()
-    bull_reclaim = c1["close"] < v1 and c["close"] > v and c["close"] > c["open"] and c["volume"] > avg_vol * 1.1
-    bear_lose    = c1["close"] > v1 and c["close"] < v and c["close"] < c["open"] and c["volume"] > avg_vol * 1.1
-    if bull_reclaim:  return "buy",  f"vwap_reclaim: price reclaimed VWAP {v:.2f}"
-    if bear_lose:     return "sell", f"vwap_reclaim: price lost VWAP {v:.2f}"
-    return None, ""
-
-def detect_ema_cross(df5, df15, df1h):
-    if len(df5) < 30:
-        return None, ""
-    e9 = ema(df5["close"], 9); e21 = ema(df5["close"], 21); r = rsi(df5["close"]); c = df5.iloc[-1]
-    cross_bull = e9.iloc[-2] <= e21.iloc[-2] and e9.iloc[-1] > e21.iloc[-1]
-    cross_bear = e9.iloc[-2] >= e21.iloc[-2] and e9.iloc[-1] < e21.iloc[-1]
-    rsi_now = r.iloc[-1]
-    if cross_bull and rsi_now > 50 and c["close"] > e21.iloc[-1]:  return "buy",  f"ema_cross: EMA9 crossed above EMA21, RSI {rsi_now:.0f}"
-    if cross_bear and rsi_now < 50 and c["close"] < e21.iloc[-1]:  return "sell", f"ema_cross: EMA9 crossed below EMA21, RSI {rsi_now:.0f}"
-    return None, ""
-
-def detect_rsi_divergence(df5, df15, df1h):
-    if len(df15) < 40:
-        return None, ""
-    closes = df15["close"]; highs = df15["high"]; lows = df15["low"]; rsi_ = rsi(closes)
-    window = 20
-    recent_close = closes.tail(window); recent_high = highs.tail(window); recent_low = lows.tail(window); recent_rsi = rsi_.tail(window)
-    price_ll = recent_low.iloc[-1]  < recent_low.iloc[:window//2].min()
-    rsi_hl   = recent_rsi.iloc[-1]  > recent_rsi.iloc[:window//2].min()
-    rsi_os   = recent_rsi.iloc[-1]  < 40
-    price_hh = recent_high.iloc[-1] > recent_high.iloc[:window//2].max()
-    rsi_lh   = recent_rsi.iloc[-1]  < recent_rsi.iloc[:window//2].max()
-    rsi_ob   = recent_rsi.iloc[-1]  > 60
-    c = df15.iloc[-1]
-    if price_ll and rsi_hl and rsi_os and c["close"] > c["open"]:  return "buy",  f"rsi_divergence: bullish divergence, RSI {recent_rsi.iloc[-1]:.0f}"
-    if price_hh and rsi_lh and rsi_ob and c["close"] < c["open"]:  return "sell", f"rsi_divergence: bearish divergence, RSI {recent_rsi.iloc[-1]:.0f}"
-    return None, ""
-
 # ── Strategy registry ─────────────────────────────────────────────────────────
 
 STRATEGY_DETECTORS = {
@@ -406,16 +255,6 @@ STRATEGY_DETECTORS = {
     "orb_scalp":      detect_orb_scalp,
     "supply_demand":  detect_supply_demand,
     "mamba_scalp":    detect_mamba_scalp,
-    "turtle_soup":    detect_turtle_soup,
-    "silver_bullet":  detect_silver_bullet,
-    "judas_swing":    detect_judas_swing,
-    "engulfing":      detect_engulfing,
-    "pin_bar":        detect_pin_bar,
-    "inside_bar":     detect_inside_bar,
-    "morning_star":   detect_morning_star,
-    "vwap_reclaim":   detect_vwap_reclaim,
-    "ema_cross":      detect_ema_cross,
-    "rsi_divergence": detect_rsi_divergence,
 }
 
 # ── Signal deduplication ──────────────────────────────────────────────────────
