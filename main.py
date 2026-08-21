@@ -29,16 +29,13 @@ from news_checker import is_news_blackout
 from scanner import start_scanner
 from fee_tracker import FeeTracker
 from outcome_labeler import OutcomeLabeler
-# NOTE: auto_labeler.auto_label_loop is intentionally NOT started below.
-# It and trade_monitor_agent_loop both independently poll+close the same
-# open paper_trades rows for XAUUSD/ES/NQ/CL with different TP/SL logic
-# and no coordination, so running both let them race to close the same
-# trade. trade_monitor_agent_loop is the superset (covers all 8 traded
-# symbols, plus BE-move and partial-TP1 handling auto_labeler lacks), so
-# it's the one agent that should own trade closing.
+# trade_monitor_agent_loop is the single owner of trade closing: it covers all
+# 8 traded symbols and handles BE-moves and partial TP1 exits. auto_labeler.py
+# used to duplicate that job for XAUUSD/ES/NQ/CL with different TP/SL logic and
+# no coordination; it was left un-started to stop the two racing, and has now
+# been deleted so it can't be switched back on by accident.
 from auto_calibrate import calibration_loop
 from daily_briefing import briefing_scheduler
-from auto_labeler import auto_label_loop
 from intel_agent import intel_agent_loop
 from market_hours import is_market_open
 from regime_agent import regime_agent_loop
@@ -214,8 +211,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(start_scanner())
     asyncio.create_task(calibration_loop())
     asyncio.create_task(briefing_scheduler())
-    # auto_label_loop deliberately not started — see NOTE at the auto_labeler
-    # import above. trade_monitor_agent_loop (started above) owns trade closing.
+    # trade_monitor_agent_loop (started above) is the sole owner of closing.
     yield
     executor.close()
     memory.close()
@@ -1071,7 +1067,7 @@ tick(); setInterval(tick, 1000);
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="30">
+<!-- auto-refresh removed: it was wiping the live chat every 30s. Use the manual REFRESH button in the header instead. -->
 <title>SNUTS // TRADING ENGINE</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;400;600&display=swap');
@@ -1139,6 +1135,12 @@ header::after {{
   border:1px solid var(--gold); color:var(--gold); padding:3px 10px;
   font-family:'Share Tech Mono',monospace; box-shadow:0 0 8px rgba(255,215,0,0.2);
 }}
+.refresh-btn {{
+  display:inline-block; margin-top:8px; margin-left:8px; font-size:.58rem; letter-spacing:3px;
+  border:1px solid var(--purple2); color:var(--purple2); padding:3px 10px; background:transparent;
+  font-family:'Share Tech Mono',monospace; cursor:pointer; box-shadow:0 0 8px rgba(155,48,255,0.2);
+}}
+.refresh-btn:hover {{ background:rgba(155,48,255,0.12); }}
 
 /* SECTION LABEL */
 .section-label {{
@@ -1411,6 +1413,7 @@ footer::before {{
   <div class="header-right">
     <div class="clock">{now_str}</div>
     <div class="mode-badge">{MODE.upper()} MODE // PHASE {PHASE}</div>
+    <button class="refresh-btn" onclick="location.reload()" title="Reload dashboard data">⟳ REFRESH</button>
   </div>
 </header>
 

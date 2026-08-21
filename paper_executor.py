@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from levels import stop_distances as _stop_distances
+
 log = logging.getLogger(__name__)
 
 DB_PATH      = os.getenv("DB_PATH", "trades.db")
@@ -41,6 +43,61 @@ def get_current_equity(db_path: str = None) -> float:
     finally:
         conn.close()
     return round(ACCOUNT_SIZE + realized_pnl, 2)
+
+
+
+
+def _realized_pnl(row, result: str, exit_price: float | None) -> float:
+    """
+    P&L from the price the trade actually exited at, not from its planned RR.
+
+    The old logic booked `risk_dollars * rr` for any WIN and `-risk_dollars`
+    for any LOSS, so the exit price was recorded and then discarded. That
+    made every result resolve to an exact +target R or -1.00R regardless of
+    where price really went — which is why 96 of the first 183 closed trades
+    sat at precisely -1.0000R and no trade ever gapped past its stop on
+    paper. It also silently overstated wins: trade_monitor_agent._choose_tp
+    targets TP1 while a strategy's win rate is under 45%, and TP1 is well
+    inside 1R on most symbols (NQ: 15pt TP1 vs 20pt SL = 0.75R), yet the
+    trade was booked at its full planned rr of up to 3.0R.
+
+    Realized R = (signed price move) / SL distance. If TP1 already partialed
+    out, half the position was banked at the TP1 distance and only half rode
+    to the exit.
+
+    Falls back to the planned-RR figure ONLY when there is no exit price or
+    no known stop distance for the symbol, and logs loudly when it does, so
+    synthetic numbers can never re-enter the book silently.
+    """
+    risk_usd = row["risk_dollars"]
+    rr       = row["rr"]
+
+    if result == "BE":
+        return 0.0
+
+    sl_dist, tp1_dist = _stop_distances(row["symbol"])
+
+    if exit_price is None or not sl_dist:
+        fallback = round(risk_usd * rr, 2) if result == "WIN" else round(-risk_usd, 2)
+        log.warning(
+            f"{row['trade_id']}: no exit price or unknown stop distance for "
+            f"{row['symbol']} — falling back to planned-RR P&L {fallback:+.2f}. "
+            f"This figure is synthetic; add {row['symbol']} to TP_DISTANCES."
+        )
+        return fallback
+
+    sign   = 1 if str(row["direction"]).upper() in ("BUY", "LONG") else -1
+    r_real = ((exit_price - row["entry_price"]) * sign) / sl_dist
+
+    try:
+        tp1_hit = bool(row["tp1_hit"])
+    except (IndexError, KeyError):
+        tp1_hit = False
+
+    if tp1_hit and tp1_dist:
+        # Half banked at TP1, half rode to the exit.
+        return round((risk_usd / 2) * (tp1_dist / sl_dist) + (risk_usd / 2) * r_real, 2)
+    return round(risk_usd * r_real, 2)
 
 # Trading timezone for day/week/month boundaries — handles EST/EDT automatically.
 TRADING_TZ = ZoneInfo("America/New_York")
@@ -166,15 +223,7 @@ class PaperExecutor:
             log.error(f"Trade not found: {trade_id}")
             return
 
-        risk_usd = row["risk_dollars"]
-        rr       = row["rr"]
-
-        if result == "WIN":
-            pnl = round(risk_usd * rr, 2)
-        elif result == "LOSS":
-            pnl = round(-risk_usd, 2)
-        else:  # BE
-            pnl = 0.0
+        pnl = _realized_pnl(row, result, exit_price)
 
         self.conn.execute(
             "UPDATE paper_trades SET result=?, exit_price=?, exit_time=?, pnl=?, status='CLOSED' WHERE trade_id=?",

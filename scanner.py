@@ -39,16 +39,10 @@ WEBHOOK_URL    = "http://localhost:8000/webhook"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "hayden_private_key")
 SCAN_INTERVAL  = 300
 
-SYMBOL_MAP = {
-    "XAUUSD": "GC=F",
-    "ES":     "ES=F",
-    "NQ":     "NQ=F",
-    "CL":     "CL=F",
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "USDJPY=X",
-    "AUDUSD": "AUDUSD=X",
-}
+# Defined once in levels.py — the scanner's universe and the monitor's must
+# not be able to drift apart, or the bot can open a trade on a symbol nothing
+# knows how to close.
+from levels import SYMBOL_MAP
 
 FOREX_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]
 

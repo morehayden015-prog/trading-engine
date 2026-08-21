@@ -55,7 +55,11 @@ def get_current_weight(strategy, symbol):
     import json
     import os
 
-    weights_file = "strategy_weights.json"
+    # Same file weight_adjuster writes — imported rather than re-declared so
+    # the two can't drift apart. It previously hardcoded a bare relative path
+    # here, which meant this lookup and the writer could resolve to different
+    # files depending on the process CWD.
+    from weight_adjuster import WEIGHTS_FILE as weights_file
 
     if not os.path.exists(weights_file):
         return 1.0  # Default weight if file doesn't exist yet
@@ -69,11 +73,46 @@ def get_current_weight(strategy, symbol):
 
 def is_strategy_enabled(strategy, symbol):
     """
-    Quick check — returns False if a strategy has been disabled (weight = 0).
+    Quick check — returns False if a strategy has been disabled.
     Use this in scanner.py or trade_scoring.py before processing signals.
+
+    The strategy_status table is authoritative, and the weights file is only
+    consulted when that table has no opinion. It used to be the reverse (file
+    only), which had two failure modes:
+
+      1. The weights file lived on the container's ephemeral filesystem, so a
+         redeploy wiped it and every disabled strategy silently resumed
+         trading while strategy_status still reported it disabled.
+      2. strategy_manager.run_auto_management() only writes the file on a
+         state *transition*. For a pair already marked disabled in the DB,
+         `currently` is already False, so the disable branch never re-fires
+         and the re-enable branch needs a win rate the pair doesn't have —
+         nothing could ever repair the file. The disable was unrecoverable
+         precisely because it had already been recorded.
+
+    Reading the DB first makes a disable survive both.
     """
-    weight = get_current_weight(strategy, symbol)
-    return weight > 0.0
+    import os
+    import sqlite3
+
+    try:
+        db_path = os.getenv("DB_PATH", "trades.db")
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT enabled FROM strategy_status WHERE key=?",
+                    (f"{strategy}::{symbol}",),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is not None:
+                return bool(row[0])
+    except sqlite3.Error:
+        # Table may not exist yet on a fresh DB — fall through to the file.
+        pass
+
+    return get_current_weight(strategy, symbol) > 0.0
 
 
 if __name__ == "__main__":

@@ -26,29 +26,8 @@ log = logging.getLogger(__name__)
 DB_PATH      = os.getenv("DB_PATH", "trades.db")
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "10000"))
 
-SYMBOL_MAP = {
-    "XAUUSD": "GC=F",
-    "ES":     "ES=F",
-    "NQ":     "NQ=F",
-    "CL":     "CL=F",
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "USDJPY=X",
-    "AUDUSD": "AUDUSD=X",
-}
-
-# TP/SL distances per symbol (price units)
-TP_DISTANCES = {
-    "XAUUSD": {"TP1": 5.0,  "TP2": 10.0, "TP3": 15.0, "SL": 4.0},
-    "ES":     {"TP1": 5.0,  "TP2": 10.0, "TP3": 20.0, "SL": 6.0},
-    "NQ":     {"TP1": 15.0, "TP2": 30.0, "TP3": 60.0, "SL": 20.0},
-    "CL":     {"TP1": 0.30, "TP2": 0.60, "TP3": 1.00, "SL": 0.25},
-    # Forex majors (price units, i.e. 0.0010 = 10 pips for 4-decimal pairs)
-    "EURUSD": {"TP1": 0.0015, "TP2": 0.0030, "TP3": 0.0050, "SL": 0.0012},
-    "GBPUSD": {"TP1": 0.0020, "TP2": 0.0040, "TP3": 0.0065, "SL": 0.0016},
-    "AUDUSD": {"TP1": 0.0012, "TP2": 0.0025, "TP3": 0.0040, "SL": 0.0010},
-    "USDJPY": {"TP1": 0.15,   "TP2": 0.30,   "TP3": 0.50,   "SL": 0.12},
-}
+# Levels and tickers come from levels.py — the one place they're defined.
+from levels import SYMBOL_MAP, TP_DISTANCES  # noqa: E402  (re-exported for callers)
 
 
 def compute_trade_levels(symbol: str, direction: str, entry_price: float,
@@ -110,23 +89,58 @@ def _get_strategy_win_rate(strategy: str, symbol: str) -> float | None:
         return None
 
 
-def _choose_tp(win_rate: float | None, regime: str) -> str:
+# A target below this many R is never selected, whatever the win rate says.
+MIN_TARGET_R = float(os.getenv("MIN_TARGET_R", "1.5"))
+
+
+def _choose_tp(win_rate: float | None, regime: str, symbol: str = None) -> str:
     """
-    Choose TP target based on win rate AND current market regime.
+    Choose TP target based on win rate AND current market regime, subject to
+    a floor on the reward:risk of the target actually chosen.
+
     Trending regime = more aggressive targets.
+
+    The win-rate rule alone dropped to TP1 below 45% — "underperforming, take
+    quick profits". On most symbols TP1 sits inside 1R (NQ: 15pt TP1 against a
+    20pt stop = 0.75R), and a sub-1R target needs a HIGHER win rate to break
+    even, not a lower one: NQ at TP1 breaks even at 57.1%, ES at 54.5%. So the
+    rule fired on weakness and then demanded a win rate the strategy had just
+    shown it did not have, with no way back — the win rate could not recover
+    while the target guaranteed negative expectancy, and the target would not
+    widen while the win rate stayed low.
+
+    The regime boost was the only escape hatch, and it is currently welded
+    shut: regime classification has been failing (Anthropic API credit
+    balance), so `regime` is stuck at "UNKNOWN" and regime_boost is never
+    True. Every strategy under 45% has therefore been pinned to TP1.
+
+    Now the win rate and regime still pick the *preferred* target, but any
+    target under MIN_TARGET_R is skipped in favour of the next one out.
     """
     # Regime boost: trending = aim higher
     regime_boost = regime in ("TRENDING_BULL", "TRENDING_BEAR")
 
     if win_rate is None:
-        return "TP2" if regime_boost else "TP1"
-
-    if win_rate >= 0.60:
-        return "TP3"
+        preferred = "TP2" if regime_boost else "TP1"
+    elif win_rate >= 0.60:
+        preferred = "TP3"
     elif win_rate >= 0.45:
-        return "TP3" if regime_boost else "TP2"
+        preferred = "TP3" if regime_boost else "TP2"
     else:
-        return "TP2" if regime_boost else "TP1"
+        preferred = "TP2" if regime_boost else "TP1"
+
+    levels = TP_DISTANCES.get(symbol, TP_DISTANCES["XAUUSD"]) if symbol else None
+    if not levels or not levels.get("SL"):
+        return preferred
+
+    order = ["TP1", "TP2", "TP3"]
+    sl    = levels["SL"]
+    for key in order[order.index(preferred):]:
+        if levels.get(key) and levels[key] / sl >= MIN_TARGET_R:
+            return key
+
+    # Nothing clears the floor — take the widest target available.
+    return order[-1]
 
 
 def _get_open_trades() -> list:
@@ -200,7 +214,8 @@ def _close_trade_in_db(trade_id: str, result: str, exit_price: float, partial: b
         conn.row_factory = sqlite3.Row
         _ensure_management_columns(conn)
         row = conn.execute(
-            "SELECT risk_pct, risk_dollars, rr, COALESCE(tp1_hit, 0) as tp1_hit, "
+            "SELECT symbol, direction, entry_price, risk_pct, risk_dollars, rr, "
+            "COALESCE(tp1_hit, 0) as tp1_hit, "
             "COALESCE(partial_pnl_banked, 0) as partial_pnl_banked "
             "FROM paper_trades WHERE trade_id=?", (trade_id,)
         ).fetchone()
@@ -215,19 +230,40 @@ def _close_trade_in_db(trade_id: str, result: str, exit_price: float, partial: b
         already_partial = bool(row["tp1_hit"])
         banked      = row["partial_pnl_banked"] or 0.0
 
+        # P&L is measured against the price the leg actually exited at,
+        # divided by the stop distance — NOT against the planned rr. Booking
+        # `risk_usd * rr` for a win meant a trade labelled at the TP1 distance
+        # (which _choose_tp targets whenever win rate < 45%) was still paid its
+        # full 1.5-3.0R plan, and every loss booked exactly -1R however far
+        # price had actually gapped past the stop.
+        levels   = TP_DISTANCES.get(row["symbol"]) or {}
+        sl_dist  = levels.get("SL")
+        tp1_dist = levels.get("TP1")
+        sign     = 1 if str(row["direction"]).upper() in ("BUY", "LONG") else -1
+
         if partial:
-            # First (TP1) partial close — banks half the size's worth of profit.
-            pnl = round(risk_usd * (rr / 2), 2)
+            # First (TP1) partial close — banks half the position at the
+            # TP1 distance, which is TP1/SL in R terms, not rr/2.
+            if sl_dist and tp1_dist:
+                pnl = round((risk_usd / 2) * (tp1_dist / sl_dist), 2)
+            else:
+                pnl = round(risk_usd * (rr / 2), 2)
+                log.warning(f"{trade_id}: unknown stop distance for {row['symbol']} — "
+                            f"partial booked at planned RR ({pnl:+.2f}), figure is synthetic")
         else:
             # Final close of the runner leg. If TP1 already partialed out,
             # only half the original risk is still open for this leg.
             remaining_risk = risk_usd / 2 if already_partial else risk_usd
-            if result == "WIN":
-                leg_pnl = round(remaining_risk * rr, 2)
-            elif result == "LOSS":
-                leg_pnl = round(-remaining_risk, 2)
-            else:
+            if result == "BE":
                 leg_pnl = 0.0
+            elif sl_dist and exit_price is not None:
+                r_real  = ((exit_price - row["entry_price"]) * sign) / sl_dist
+                leg_pnl = round(remaining_risk * r_real, 2)
+            else:
+                leg_pnl = round(remaining_risk * rr, 2) if result == "WIN" else round(-remaining_risk, 2)
+                log.warning(f"{trade_id}: no exit price or unknown stop distance for "
+                            f"{row['symbol']} — leg booked at planned RR ({leg_pnl:+.2f}), "
+                            f"figure is synthetic")
             pnl = round(banked + leg_pnl, 2)
 
         status = "PARTIAL" if partial else "CLOSED"
@@ -301,7 +337,7 @@ async def trade_monitor_agent_loop():
 
                 levels   = TP_DISTANCES.get(symbol, TP_DISTANCES["XAUUSD"])
                 win_rate = _get_strategy_win_rate(strategy, symbol)
-                tp_target = _choose_tp(win_rate, regime)
+                tp_target = _choose_tp(win_rate, regime, symbol)
 
                 sl_dist  = levels["SL"]
                 tp1_dist = levels["TP1"]
@@ -337,6 +373,32 @@ async def trade_monitor_agent_loop():
                     at_sl    = price >= (entry if be_moved else sl_price)
 
                 # --- Trade management logic ---
+
+                # 0. Stop loss hit — checked BEFORE any target. This loop polls
+                # every 30s, so a price sitting past both the stop and a target
+                # says nothing about which was touched first. Evaluating targets
+                # first (the previous order) silently resolved every one of
+                # those ambiguous polls as a win. Taking the loss is the
+                # standard conservative convention.
+                if at_sl:
+                    pnl, risk_pct, risk_usd = _close_trade_in_db(trade_id, "LOSS", price)
+                    log.info(f"{trade_id} | LOSS @ SL {price} | P&L={pnl:+.2f}")
+                    try:
+                        from alerts import send_trade_closed
+                        await send_trade_closed(
+                            trade_id=trade_id,
+                            symbol=symbol,
+                            result="LOSS",
+                            exit_price=price,
+                            pnl=pnl,
+                            tp_used="SL",
+                            win_rate=win_rate,
+                            risk_pct=risk_pct,
+                            risk_usd=risk_usd,
+                        )
+                    except Exception:
+                        pass
+                    continue
 
                 # 1. Move to breakeven after TP1 hit
                 if at_be and not be_moved:
@@ -397,25 +459,7 @@ async def trade_monitor_agent_loop():
                         pass
                     continue
 
-                # 4. Stop loss hit
-                if at_sl:
-                    pnl, risk_pct, risk_usd = _close_trade_in_db(trade_id, "LOSS", price)
-                    log.info(f"{trade_id} | LOSS @ SL {price} | P&L={pnl:+.2f}")
-                    try:
-                        from alerts import send_trade_closed
-                        await send_trade_closed(
-                            trade_id=trade_id,
-                            symbol=symbol,
-                            result="LOSS",
-                            exit_price=price,
-                            pnl=pnl,
-                            tp_used="SL",
-                            win_rate=win_rate,
-                            risk_pct=risk_pct,
-                            risk_usd=risk_usd,
-                        )
-                    except Exception:
-                        pass
+                # (stop-loss handling now runs first — see step 0 above)
 
         except Exception as e:
             log.error(f"Trade monitor error: {e}")

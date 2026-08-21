@@ -12,7 +12,18 @@ from datetime import datetime
 from analyzer import run_analysis
 
 
-WEIGHTS_FILE = "strategy_weights.json"
+# Stored beside the trades DB, not in the process CWD. As a bare relative
+# path this file lived in /app on Railway — ephemeral container filesystem —
+# so every redeploy wiped it. That silently re-enabled auto-disabled
+# strategies: strategy_manager._set_enabled records a disable in BOTH the
+# strategy_status table and this file, but self_learning.is_strategy_enabled()
+# (the only thing that actually gates a live signal) reads this file alone and
+# defaults to enabled when it's missing. The DB sits on a mounted volume, so
+# co-locating the weights there makes a disable survive a deploy.
+WEIGHTS_FILE = os.path.join(
+    os.path.dirname(os.getenv("DB_PATH", "trades.db")) or ".",
+    "strategy_weights.json",
+)
 MAX_WEIGHT = 2.0   # Cap — no strategy can scale beyond 2x
 MIN_WEIGHT = 0.0   # Floor — 0 means disabled
 

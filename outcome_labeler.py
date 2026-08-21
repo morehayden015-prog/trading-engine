@@ -1,7 +1,11 @@
 """
-outcome_labeler.py — Trade outcome labeling
-Supports manual labeling via /outcome endpoint and
-automatic labeling via price-based TP/SL detection.
+outcome_labeler.py — Manual trade outcome labeling for the /outcome endpoint.
+
+The price-based auto-labeling that used to live here (check_price_based) was
+dead code — nothing ever called it — and carried its own copy of the TP/SL
+table that was missing every forex pair, so a EURUSD trade would have been
+given the XAUUSD row's 4.0-price-unit stop. Automatic closing is owned by
+trade_monitor_agent.py; levels live in levels.py.
 """
 import os
 import sqlite3
@@ -11,14 +15,6 @@ from datetime import datetime
 log = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("DB_PATH", "trades.db")
-
-# Default TP/SL distances by symbol (in price units)
-TP_DISTANCES = {
-    "XAUUSD": {"TP1": 5.0, "TP2": 10.0, "TP3": 15.0, "SL": 4.0},
-    "ES":     {"TP1": 5.0, "TP2": 10.0, "TP3": 20.0, "SL": 6.0},
-    "NQ":     {"TP1": 15.0,"TP2": 30.0, "TP3": 60.0, "SL": 20.0},
-    "CL":     {"TP1": 0.30,"TP2": 0.60, "TP3": 1.00, "SL": 0.25},
-}
 
 
 class OutcomeLabeler:
@@ -52,52 +48,6 @@ class OutcomeLabeler:
         else:
             log.warning(f"Trade {trade_id} not found or already closed")
             return False
-
-    def check_price_based(self, symbol: str, current_price: float) -> list:
-        """
-        Check all open trades for this symbol and auto-label
-        if current price has hit TP1 or SL.
-        Returns list of auto-labeled trade_ids.
-        """
-        c = self.conn.cursor()
-        open_trades = c.execute(
-            "SELECT trade_id, direction, entry_price FROM paper_trades WHERE symbol=? AND status='OPEN'",
-            (symbol,),
-        ).fetchall()
-
-        levels = TP_DISTANCES.get(symbol, TP_DISTANCES["XAUUSD"])
-        labeled = []
-
-        for trade in open_trades:
-            trade_id    = trade["trade_id"]
-            # Actual stored direction values are lowercase "buy"/"sell" (see
-            # main.py webhook, scanner.py), never the literal "LONG" — this
-            # comparison always fell through to the SHORT branch below,
-            # inverting TP/SL for real long trades. Normalize + accept both
-            # conventions, matching trade_monitor_agent.py / auto_labeler.py.
-            direction   = trade["direction"].upper()
-            entry_price = trade["entry_price"]
-
-            if direction in ("BUY", "LONG"):
-                tp1 = entry_price + levels["TP1"]
-                sl  = entry_price - levels["SL"]
-                if current_price >= tp1:
-                    self.label_manual(trade_id, "WIN", current_price)
-                    labeled.append({"trade_id": trade_id, "result": "WIN"})
-                elif current_price <= sl:
-                    self.label_manual(trade_id, "LOSS", current_price)
-                    labeled.append({"trade_id": trade_id, "result": "LOSS"})
-            else:  # SHORT
-                tp1 = entry_price - levels["TP1"]
-                sl  = entry_price + levels["SL"]
-                if current_price <= tp1:
-                    self.label_manual(trade_id, "WIN", current_price)
-                    labeled.append({"trade_id": trade_id, "result": "WIN"})
-                elif current_price >= sl:
-                    self.label_manual(trade_id, "LOSS", current_price)
-                    labeled.append({"trade_id": trade_id, "result": "LOSS"})
-
-        return labeled
 
     def get_unlabeled(self, limit: int = 20) -> list:
         rows = self.conn.execute(
