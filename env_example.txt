@@ -11,7 +11,6 @@ BASE_RISK_PCT=1.0
 
 # ── Circuit breakers ─────────────────────────────────────────────────────────
 DAILY_LOSS_LIMIT_PCT=3.0
-WEEKLY_LOSS_LIMIT_PCT=7.0
 CONSEC_LOSS_LIMIT=4
 
 # ── News blackout ─────────────────────────────────────────────────────────────

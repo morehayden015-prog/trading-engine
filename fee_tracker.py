@@ -3,8 +3,8 @@ fee_tracker.py — Fee tracking + circuit breakers
 Monitors cumulative losses and prevents slow bleed.
 Circuit breakers:
   - Daily loss limit: 3% of account
-  - Weekly loss limit: 7% of account
   - Consecutive losses: 4 in a row → pause 1 hour
+(No weekly loss limit — weekly P&L is reported but never halts trading.)
 """
 import os
 import sqlite3
@@ -22,13 +22,12 @@ DB_PATH      = os.getenv("DB_PATH", "trades.db")
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "10000"))
 
 DAILY_LOSS_LIMIT_PCT  = float(os.getenv("DAILY_LOSS_LIMIT_PCT",  "3.0"))
-WEEKLY_LOSS_LIMIT_PCT = float(os.getenv("WEEKLY_LOSS_LIMIT_PCT", "7.0"))
 CONSEC_LOSS_LIMIT     = int(os.getenv("CONSEC_LOSS_LIMIT",       "4"))
 
 
 class FeeTracker:
     def __init__(self, account_size: float = None):
-        # Compounding by default: daily/weekly loss-limit thresholds scale
+        # Compounding by default: the daily loss-limit threshold scales
         # with the account's actual current equity, not a fixed starting
         # balance. Callers that explicitly pass account_size still override.
         self.account_size = account_size if account_size is not None else get_current_equity(DB_PATH)
@@ -75,20 +74,16 @@ class FeeTracker:
         consec     = self.get_consecutive_losses()
 
         daily_limit  = -(self.account_size * DAILY_LOSS_LIMIT_PCT  / 100)
-        weekly_limit = -(self.account_size * WEEKLY_LOSS_LIMIT_PCT / 100)
 
         details = {
             "pnl_today":   daily_pnl,
-            "pnl_7d":      weekly_pnl,
+            "pnl_7d":      weekly_pnl,   # informational only — no weekly limit
             "consec_loss": consec,
             "daily_limit": daily_limit,
-            "weekly_limit":weekly_limit,
         }
 
         if daily_pnl <= daily_limit:
             return {"status": "red",    "reason": f"Daily loss limit hit (${daily_pnl:+.2f})", "details": details}
-        if weekly_pnl <= weekly_limit:
-            return {"status": "red",    "reason": f"Weekly loss limit hit (${weekly_pnl:+.2f})", "details": details}
         if consec >= CONSEC_LOSS_LIMIT:
             return {"status": "yellow", "reason": f"{consec} consecutive losses — reduced sizing", "details": details}
         if daily_pnl < 0 and abs(daily_pnl) > abs(daily_limit) * 0.7:
