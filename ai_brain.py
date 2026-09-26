@@ -141,3 +141,57 @@ def _get_session(utc_hour: int) -> str:
         return "NY_AFTERNOON"
     else:
         return "NY_CLOSE"
+
+
+LEARNING_SYSTEM_PROMPT = """You are Hayden's trading bot, reflecting on your own self-learning cycle.
+
+You just analyzed your own recent paper trades and adjusted (or held steady) either
+per-strategy weights or scoring-component weights, based purely on the performance
+data given to you.
+
+Write a short, first-person reflection — 3 to 5 plain-English sentences, no headers,
+no bullet points, no JSON. Cover:
+- what you noticed in the numbers that drove any change (or lack of one)
+- why you made the call you made
+- anything in the data that concerns you or that Hayden should keep an eye on
+
+Speak like a trader explaining their thinking out loud, not like a report."""
+
+
+def explain_learning_cycle(cycle_type: str, data_summary: dict = None, performance: dict = None, changes=None) -> str:
+    """
+    Ask Claude to explain, in its own words, the reasoning behind a
+    self-learning or calibration cycle's outcome.
+
+    cycle_type: a short label such as "self_learning", "self_learning_no_data",
+                or "calibration" — just context for the model, not parsed.
+    Returns plain text. Never raises — falls back to a short note on any
+    API/parsing failure so a flaky reflection call can't break the learning
+    cycle itself.
+    """
+    try:
+        payload = {
+            "cycle_type": cycle_type,
+            "data_summary": data_summary,
+            "performance": performance,
+            "changes": changes,
+        }
+        user_message = (
+            "Here is this cycle's data (performance matrix / calibration result, "
+            "and whatever changes were applied):\n\n"
+            f"{json.dumps(payload, default=str, indent=2)}\n\n"
+            "Explain your thinking."
+        )
+
+        response = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=300,
+            system=LEARNING_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        text = response.content[0].text.strip()
+        log.info(f"Learning reflection generated | cycle={cycle_type} | chars={len(text)}")
+        return text
+    except Exception as e:
+        log.error(f"Learning reflection error: {e}")
+        return f"(reflection unavailable: {e})"

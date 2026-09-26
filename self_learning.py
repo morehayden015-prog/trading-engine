@@ -4,7 +4,8 @@ Level 1 Self-Learning System
 Main entry point. Runs the full self-learning cycle:
 1. Analyze closed trades
 2. Adjust strategy weights
-3. Log all changes
+3. Ask the AI to explain its own reasoning for the cycle's outcome
+4. Log all changes (including that reasoning)
 
 Called by auto_calibrate.py on:
 - Every Sunday (weekly cycle)
@@ -14,15 +15,19 @@ Can also be run manually: python self_learning.py
 """
 
 from datetime import datetime
-from analyzer import run_analysis
+from analyzer import run_analysis, get_data_collection_summary
 from weight_adjuster import run_adjustment
 from learning_logger import log_adjustment_session, log_no_data_session
+from ai_brain import explain_learning_cycle
 
 
 def run_self_learning_cycle(trigger="manual"):
     """
     Full self-learning cycle.
     trigger: 'manual', 'weekly', or 'trade_count'
+    Returns (changes, reasoning) — reasoning is the bot's own plain-English
+    explanation of what it did this cycle and why (or None if it couldn't
+    be generated).
     """
     print(f"\n{'='*60}")
     print(f"SELF-LEARNING CYCLE STARTED")
@@ -31,20 +36,35 @@ def run_self_learning_cycle(trigger="manual"):
     print(f"{'='*60}")
 
     # Run weight adjustment (which internally runs analysis)
-    changes = run_adjustment()
+    changes, performance = run_adjustment()
+    data_summary = get_data_collection_summary()
 
-    # Log the session
+    # Ask the bot to explain its own reasoning for this cycle's outcome
+    reasoning = None
+    try:
+        if changes is None:
+            reasoning = explain_learning_cycle("self_learning_no_data", data_summary, None, None)
+        else:
+            reasoning = explain_learning_cycle("self_learning", data_summary, performance, changes)
+    except Exception as e:
+        print(f"[SELF-LEARNING] Could not generate reasoning: {e}")
+
+    # Log the session — includes the full "how it collected data" narrative
+    # plus the bot's own reasoning about why it did what it did
     if changes is None:
-        log_no_data_session()
+        log_no_data_session(data_summary, ai_reasoning=reasoning)
     elif len(changes) == 0:
-        log_adjustment_session([])
+        log_adjustment_session([], data_summary, performance, ai_reasoning=reasoning)
         print("\n[SELF-LEARNING] All weights stable — no adjustments needed")
     else:
-        log_adjustment_session(changes)
+        log_adjustment_session(changes, data_summary, performance, ai_reasoning=reasoning)
         print(f"\n[SELF-LEARNING] Cycle complete — {len(changes)} weight(s) updated")
 
+    if reasoning:
+        print(f"\n[SELF-LEARNING] Bot's own reasoning:\n{reasoning}")
+
     print(f"{'='*60}\n")
-    return changes
+    return changes, reasoning
 
 
 def get_current_weight(strategy, symbol):

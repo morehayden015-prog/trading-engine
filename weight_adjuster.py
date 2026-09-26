@@ -117,6 +117,11 @@ def run_adjustment():
     """
     Main adjustment function.
     Runs analysis, applies weight changes, saves results.
+    Returns (changes, performance) — performance is the full matrix
+    (what data was pulled and how it was grouped/scored) so callers
+    can log the full reasoning process, not just the resulting changes.
+    changes is None (with performance == {}) when there wasn't enough
+    data to analyze anything this cycle.
     """
     print(f"\n[ADJUSTER] Starting weight adjustment — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -124,17 +129,17 @@ def run_adjustment():
 
     if not performance:
         print("[ADJUSTER] No performance data available. Skipping adjustment.")
-        return
+        return None, {}
 
     current_weights = load_weights()
     updated_weights, changes = apply_adjustments(current_weights, performance)
     save_weights(updated_weights)
     print(f"\n[ADJUSTER] Weights saved to {WEIGHTS_FILE}")
-    return changes
+    return changes, performance
 
 
 if __name__ == "__main__":
-    changes = run_adjustment()
+    changes, performance = run_adjustment()
     if changes:
         print(f"\n[ADJUSTER] {len(changes)} weight(s) updated")
     else:

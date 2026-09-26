@@ -5,13 +5,14 @@ Analyzes closed trades from paper_trades table and produces
 a performance matrix per strategy/symbol combination.
 """
 
+import os
 import sqlite3
 import json
 from datetime import datetime
 from collections import defaultdict
 
 
-DB_PATH = "trades.db"
+DB_PATH = os.getenv("DB_PATH", "trades.db")
 MIN_TRADES_FOR_ANALYSIS = 5  # Minimum trades before adjusting a strategy
 
 
@@ -110,6 +111,30 @@ def determine_weight_adjustment(stats):
 
     # Poor performer — disable
     return 0.0, f"Poor performer: WR below 40% ({round(win_rate*100, 1)}%), disabling"
+
+
+def get_data_collection_summary(trades=None) -> dict:
+    """
+    Describes exactly what data this analysis run pulled — used so the
+    learning log can explain *how* the bot is collecting/using data,
+    not just what it decided.
+    """
+    trades = trades if trades is not None else get_closed_trades()
+    if not trades:
+        return {
+            "source": "paper_trades table (status = 'CLOSED')",
+            "n_trades": 0,
+            "date_range": None,
+            "min_trades_per_group": MIN_TRADES_FOR_ANALYSIS,
+        }
+
+    times = [t.get("exit_time") for t in trades if t.get("exit_time")]
+    return {
+        "source": "paper_trades table (status = 'CLOSED'), ordered by exit_time ASC",
+        "n_trades": len(trades),
+        "date_range": {"earliest": min(times) if times else None, "latest": max(times) if times else None},
+        "min_trades_per_group": MIN_TRADES_FOR_ANALYSIS,
+    }
 
 
 def run_analysis():

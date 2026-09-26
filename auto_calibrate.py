@@ -3,7 +3,8 @@ auto_calibrate.py — Automatic calibration scheduler
 Runs calibration:
   - Every Sunday at 00:00 UTC
   - Every 25 new labelled trades
-Sends calibration report to #bot-updates Discord channel.
+Sends calibration report to #bot-updates Discord channel, including the
+bot's own plain-English reasoning for what it did and why.
 """
 
 import os
@@ -15,6 +16,8 @@ from datetime import datetime, timezone
 from calibrate import calibrate
 from strategy_manager import StrategyManager
 from self_learning import run_self_learning_cycle
+from learning_logger import log_calibration_session
+from ai_brain import explain_learning_cycle
 
 log = logging.getLogger(__name__)
 
@@ -40,13 +43,20 @@ async def run_calibration_cycle():
 
     # Weight calibration
     result = calibrate()
+    if not result.get("skipped"):
+        try:
+            result["ai_reasoning"] = explain_learning_cycle("calibration", None, None, result)
+        except Exception as e:
+            log.error(f"Calibration reasoning error: {e}")
+            result["ai_reasoning"] = None
+    log_calibration_session(result)
 
     # Strategy auto-management
     sm = StrategyManager()
     report = sm.run_auto_management()
 
     # Self-learning cycle
-    run_self_learning_cycle(trigger="weekly")
+    self_learning_changes, self_learning_reasoning = run_self_learning_cycle(trigger="weekly")
 
     sm.close()
 
@@ -74,6 +84,14 @@ async def run_calibration_cycle():
             lines.append(f"\n⚠️ Auto-disabled: {', '.join(disabled)}")
         if enabled:
             lines.append(f"✅ Re-enabled: {', '.join(enabled)}")
+
+        if result.get("ai_reasoning"):
+            lines.append(f"\n💭 **Calibration thinking:** {result['ai_reasoning']}")
+
+        if self_learning_changes:
+            lines.append(f"\n**Self-Learning:** {len(self_learning_changes)} strategy weight(s) updated")
+        if self_learning_reasoning:
+            lines.append(f"💭 **Self-learning thinking:** {self_learning_reasoning}")
 
         await send_bot_update("Weekly Calibration Report", "\n".join(lines))
     except Exception as e:
