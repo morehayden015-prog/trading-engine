@@ -28,3 +28,17 @@ strategy_weights.json
 fix.py
 fix2.py
 check_db.py
+
+# Trade data + DB backups (never commit)
+trades.db
+*.db.bak-*
+*.db.failed-*
+*.migration-failed*
+*.db.replaced-*
+*.db.restored-*
+.pytest_cache/
+backups/
+trades.json
+trade_export.csv
+stats.json
+open_positions.json

@@ -311,8 +311,10 @@ class PaperExecutor:
         return row["n"] if row else 0
 
     def get_session_stats(self) -> dict:
+        # All closed trades. (This used to be capped at the most recent 50,
+        # which made the /stats and dashboard "totals" wrong past 50 trades.)
         rows = self.conn.execute(
-            "SELECT result, pnl FROM paper_trades WHERE status='CLOSED' ORDER BY rowid DESC LIMIT 50"
+            "SELECT result, pnl FROM paper_trades WHERE status='CLOSED'"
         ).fetchall()
         total    = len(rows)
         wins     = sum(1 for r in rows if r["result"] == "WIN")

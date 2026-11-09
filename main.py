@@ -10,6 +10,7 @@ import asyncio
 import logging
 import hmac
 import hashlib
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -23,7 +24,9 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from ai_brain import evaluate_signal
 from trade_scoring import score_signal
 from alerts import send_trade_alert
-from paper_executor import PaperExecutor
+from paper_executor import PaperExecutor, DB_PATH as PAPER_DB_PATH
+import migrations
+from db_backup import daily_backup_loop, list_backups, resolve_backup, restore_if_requested
 from memory import Memory
 from news_checker import is_news_blackout
 from scanner import start_scanner
@@ -113,8 +116,30 @@ def _check_admin_auth(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 # ── Dashboard passcode auth ──
-DASHBOARD_PASSCODE   = os.getenv("DASHBOARD_PASSCODE", "8462")
-DASHBOARD_SECRET_KEY = os.getenv("DASHBOARD_SECRET_KEY", "bot-secret-key")
+# No fallback: the old hardcoded passcode sat in a public repo, so if the env
+# var is missing (or still set to that leaked value) the dashboard refuses to
+# load rather than quietly accepting it.
+_LEAKED_PASSCODE_SHA256 = "07c903ce633842c12f7430406521a6d57fd72de978b2c667a5bf8ec2cc7f9a9c"
+
+def _resolve_passcode(value: str) -> tuple:
+    """Returns (passcode, problem). passcode is "" whenever the dashboard must stay shut."""
+    value = (value or "").strip()
+    if not value:
+        return "", "DASHBOARD_PASSCODE is not set."
+    if hashlib.sha256(value.encode()).hexdigest() == _LEAKED_PASSCODE_SHA256:
+        return "", "DASHBOARD_PASSCODE is still the old leaked value. Choose a new one."
+    return value, ""
+
+
+DASHBOARD_PASSCODE, _PASSCODE_PROBLEM = _resolve_passcode(os.getenv("DASHBOARD_PASSCODE", ""))
+
+# Session-cookie signing key. The old default was also public, which let anyone
+# forge a logged-in cookie. If unset, use a random per-process key instead
+# (logins then simply expire on each redeploy).
+DASHBOARD_SECRET_KEY = os.getenv("DASHBOARD_SECRET_KEY", "").strip()
+_SECRET_KEY_IS_EPHEMERAL = DASHBOARD_SECRET_KEY in ("", "bot-secret-key")
+if _SECRET_KEY_IS_EPHEMERAL:
+    DASHBOARD_SECRET_KEY = secrets.token_hex(32)
 SESSION_COOKIE_NAME  = "dashboard_session"
 SESSION_MAX_AGE      = 60 * 60 * 24 * 7  # 7 days
 _serializer = URLSafeTimedSerializer(DASHBOARD_SECRET_KEY)
@@ -124,7 +149,22 @@ def _make_session_token() -> str:
     return _serializer.dumps({"auth": True})
 
 
+def _dashboard_disabled_response() -> HTMLResponse:
+    return HTMLResponse(
+        status_code=503,
+        content=(
+            "<html><body style='background:#0a0a0a;color:#ddd;font-family:monospace;padding:40px'>"
+            "<h2>DASHBOARD DISABLED</h2>"
+            f"<p>{_PASSCODE_PROBLEM}</p>"
+            "<p>Set a new DASHBOARD_PASSCODE in Railway &rarr; service &rarr; Variables, then redeploy.</p>"
+            "</body></html>"
+        ),
+    )
+
+
 def _has_valid_session(request: Request) -> bool:
+    if not DASHBOARD_PASSCODE:
+        return False
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token:
         return False
@@ -188,6 +228,11 @@ button:hover {{ background:#c084fc; }}
 </html>"""
 
 
+# Backup + baseline + pending migrations run here, before anything below
+# opens the DB. Raises (and aborts startup) if history would be altered.
+restore_if_requested(PAPER_DB_PATH)   # only acts if RESTORE_FROM is set (see docs/BACKUP_RESTORE.md)
+MIGRATION_REPORT = migrations.run_migrations(PAPER_DB_PATH)
+
 executor = PaperExecutor()
 memory   = Memory()
 labeler  = OutcomeLabeler()
@@ -199,11 +244,19 @@ async def lifespan(app: FastAPI):
         f"Starting Hayden Multi-Market Bot | MODE={MODE.upper()} | PHASE={PHASE} "
         f"| Symbols={ALLOWED_SYMBOLS} | Port=8000"
     )
-    if DASHBOARD_SECRET_KEY == "bot-secret-key":
+    if _SECRET_KEY_IS_EPHEMERAL:
         log.warning(
-            "DASHBOARD_SECRET_KEY is still the default 'bot-secret-key'. "
-            "Set a strong DASHBOARD_SECRET_KEY env var to secure dashboard sessions."
+            "DASHBOARD_SECRET_KEY is not set — using a random key for this process. "
+            "Dashboard logins will reset on every redeploy until you set it."
         )
+    if _PASSCODE_PROBLEM:
+        log.error(f"Dashboard is DISABLED: {_PASSCODE_PROBLEM}")
+    log.info(
+        f"DB migrations | applied_now={MIGRATION_REPORT['applied_now']} "
+        f"| backup={MIGRATION_REPORT['backup']} "
+        f"| closed_trades={MIGRATION_REPORT['after']['closed_trades']} "
+        f"| net_pnl={MIGRATION_REPORT['after']['net_pnl']}"
+    )
     asyncio.create_task(intel_agent_loop())
     asyncio.create_task(regime_agent_loop())
     asyncio.create_task(risk_agent_loop())
@@ -211,6 +264,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(start_scanner())
     asyncio.create_task(calibration_loop())
     asyncio.create_task(briefing_scheduler())
+    asyncio.create_task(daily_backup_loop())
     # trade_monitor_agent_loop (started above) is the sole owner of closing.
     yield
     executor.close()
@@ -431,6 +485,10 @@ async def health():
         "circuit_breaker": cb["status"],
         "cb_reason":       cb["reason"],
         "market_open":     is_market_open(),
+        "db_path":         PAPER_DB_PATH,
+        "db_dir_is_mount": os.path.ismount(os.path.dirname(os.path.abspath(PAPER_DB_PATH))),
+        "migrations":      len(MIGRATION_REPORT["already_applied"]) + len(MIGRATION_REPORT["applied_now"]),
+        "dashboard":       "disabled" if _PASSCODE_PROBLEM else "enabled",
     })
 
 
@@ -636,6 +694,39 @@ async def admin_download_backup(request: Request, path: str):
     return FileResponse(full_path, filename=filename, media_type="application/octet-stream")
 
 
+# ── Admin: DB status, baselines and backups (read-only) ──
+# Protected by ADMIN_SECRET env var, sent as the X-Admin-Token header.
+
+@app.get("/admin/db-status")
+async def admin_db_status(request: Request):
+    """DB path / volume / migrations / current baseline / stored-baseline check / backups."""
+    _check_admin_auth(request)
+    st = migrations.status(PAPER_DB_PATH)
+    checks = migrations.verify_stored_baselines(PAPER_DB_PATH)
+    return JSONResponse({
+        **st,
+        "last_startup": {
+            "applied_now": MIGRATION_REPORT["applied_now"],
+            "backup":      MIGRATION_REPORT["backup"],
+            "before":      MIGRATION_REPORT["before"],
+            "after":       MIGRATION_REPORT["after"],
+        },
+        "history_intact":   all(c["ok"] for c in checks),
+        "baseline_checks":  checks[-20:],
+        "backups":          list_backups(PAPER_DB_PATH),
+    })
+
+
+@app.get("/admin/backups/{name}")
+async def admin_download_any_backup(request: Request, name: str):
+    """Download a daily / pre-migration / pre-dedupe backup listed by /admin/db-status."""
+    _check_admin_auth(request)
+    full_path = resolve_backup(name, PAPER_DB_PATH)
+    if not full_path:
+        raise HTTPException(status_code=404, detail="Backup not found")
+    return FileResponse(full_path, filename=os.path.basename(full_path), media_type="application/octet-stream")
+
+
 # ── Admin: read-only per-strategy/symbol performance breakdown ──
 # Protected by ADMIN_SECRET env var, sent as the {secret} path segment.
 # Read-only: never writes to the DB. Mirrors the day-boundary convention
@@ -779,16 +870,20 @@ async def admin_strategy_breakdown(secret: str, days: int = 1):
 
 @app.get("/login")
 async def login_form(request: Request):
+    if not DASHBOARD_PASSCODE:
+        return _dashboard_disabled_response()
     return HTMLResponse(content=LOGIN_PAGE_HTML.format(error_html=""))
 
 
 @app.post("/login")
 async def login_submit(request: Request):
+    if not DASHBOARD_PASSCODE:
+        return _dashboard_disabled_response()
     try:
         form = await request.form()
-        passcode = form.get("passcode", "")
+        passcode = str(form.get("passcode", ""))
 
-        if passcode != DASHBOARD_PASSCODE:
+        if not hmac.compare_digest(passcode.encode(), DASHBOARD_PASSCODE.encode()):
             error_html = '<div class="error">INCORRECT PASSCODE</div>'
             return HTMLResponse(
                 content=LOGIN_PAGE_HTML.format(error_html=error_html),
@@ -822,6 +917,8 @@ async def logout():
 
 @app.get("/dashboard", response_class=None)
 async def dashboard(request: Request, days: int = 7):
+    if not DASHBOARD_PASSCODE:
+        return _dashboard_disabled_response()
     if not _has_valid_session(request):
         return RedirectResponse(url="/login", status_code=303)
     # days=0 means "all time" (see _compute_strategy_breakdown docstring).
